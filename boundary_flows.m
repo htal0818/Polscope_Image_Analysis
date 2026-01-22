@@ -71,7 +71,7 @@ thetaCenters = thetaEdges;        % treat as centers for output
 thetaBinEdges = linspace(0,2*pi,nThetaBins+1);
 
 % --- Boundary smoothing / spline sampling ---
-nDenseSpline = 2500;   % dense samples along spline for nearest-point lookup
+nDenseSpline = 5000;   % dense samples along boundary for smooth nearest-point lookup (increased density)
 
 % --- Quality control thresholds ---
 minAreaFrac  = 0.05;   % reject if mask area < frac of image area
@@ -92,6 +92,18 @@ cacheUseHintCenter      = true;  % Use previous center as circle fit initializat
 % --- Outputs ---
 outDir = fullfile(base_dir, 'tangential_kymo_out');
 if ~exist(outDir,'dir'); mkdir(outDir); end
+
+% Create subdirectories for organized outputs
+outDir_kymographs = fullfile(outDir, 'kymographs');
+outDir_quiver = fullfile(outDir, 'quiver_overlays');
+outDir_snapshots = fullfile(outDir, 'snapshots');
+outDir_qc = fullfile(outDir, 'qc');
+
+if ~exist(outDir_kymographs,'dir'); mkdir(outDir_kymographs); end
+if ~exist(outDir_quiver,'dir'); mkdir(outDir_quiver); end
+if ~exist(outDir_snapshots,'dir'); mkdir(outDir_snapshots); end
+if ~exist(outDir_qc,'dir'); mkdir(outDir_qc); end
+
 saveEveryN_QC = 20;
 
 % ============================================================================
@@ -105,6 +117,7 @@ quiverScale = 1.5;           % Arrow length scaling factor
 makeEnhancedKymographs = true;  % Create magnitude + signed directional kymographs
 makeSnapshotPlots = true;       % Create detailed snapshot visualizations
 snapshotFrames = [];            % Specific frames to visualize (empty = auto-select)
+snapshotEveryNFrames = 2;       % Save tangential flow analysis every N frames
 
 %% ========================== LOAD PIV DATA =================================
 S = load(pivMatFile);
@@ -285,8 +298,8 @@ for fr = 1:nFrames
         qcFig = figure('Visible','off'); imshow(I,[]); hold on;
         plot(dbgFlow.xDense, dbgFlow.yDense, 'LineWidth', 2);
         scatter(dbgFlow.sampleX, dbgFlow.sampleY, 8, 'filled');
-        title(sprintf('Frame %d boundary spline + sampled PIV band points', fr));
-        exportgraphics(qcFig, fullfile(outDir, sprintf('QC_boundary_band_fr%04d.png', fr)), 'Resolution', 250);
+        title(sprintf('Frame %d boundary + sampled PIV band points', fr));
+        exportgraphics(qcFig, fullfile(outDir_qc, sprintf('QC_boundary_band_fr%04d.png', fr)), 'Resolution', 250);
         close(qcFig);
     end
 
@@ -315,36 +328,36 @@ fprintf('Generating visualizations...\n');
 
 % --- 1) BASIC SIGNED KYMOGRAPH (original) ---
 fig1 = figure('Position', [100 100 1000 600]);
-imagesc(rad2deg(thetaCenters), time_min, Vtheta_kymo);
+imagesc(1:nThetaBins, time_min, Vtheta_kymo);
 axis tight;
-xlabel('\theta (deg)', 'FontSize', 12);
+xlabel('Angular Bin Number', 'FontSize', 12);
 ylabel('Time (min)', 'FontSize', 12);
 title('Tangential Cortical Flow v_\theta(\theta,t) - Signed (μm/s)', 'FontSize', 14);
 colormap(gca, 'parula');
 cb = colorbar;
 ylabel(cb, 'v_\theta (μm/s)', 'FontSize', 11);
 set(gca, 'FontSize', 11);
-exportgraphics(fig1, fullfile(outDir,'kymograph_vtheta_signed.png'), 'Resolution', 300);
+exportgraphics(fig1, fullfile(outDir_kymographs,'kymograph_vtheta_signed.png'), 'Resolution', 300);
 
 if makeEnhancedKymographs
     % --- 2) MAGNITUDE KYMOGRAPH (absolute values) ---
     fig2 = figure('Position', [100 100 1000 600]);
-    imagesc(rad2deg(thetaCenters), time_min, abs(Vtheta_kymo));
+    imagesc(1:nThetaBins, time_min, abs(Vtheta_kymo));
     axis tight;
-    xlabel('\theta (deg)', 'FontSize', 12);
+    xlabel('Angular Bin Number', 'FontSize', 12);
     ylabel('Time (min)', 'FontSize', 12);
     title('Tangential Flow Magnitude |v_\theta(\theta,t)| (μm/s)', 'FontSize', 14);
     colormap(gca, 'hot');
     cb = colorbar;
     ylabel(cb, '|v_\theta| (μm/s)', 'FontSize', 11);
     set(gca, 'FontSize', 11);
-    exportgraphics(fig2, fullfile(outDir,'kymograph_vtheta_magnitude.png'), 'Resolution', 300);
+    exportgraphics(fig2, fullfile(outDir_kymographs,'kymograph_vtheta_magnitude.png'), 'Resolution', 300);
 
     % --- 3) DIRECTIONAL KYMOGRAPH (diverging colormap) ---
     fig3 = figure('Position', [100 100 1000 600]);
-    imagesc(rad2deg(thetaCenters), time_min, Vtheta_kymo);
+    imagesc(1:nThetaBins, time_min, Vtheta_kymo);
     axis tight;
-    xlabel('\theta (deg)', 'FontSize', 12);
+    xlabel('Angular Bin Number', 'FontSize', 12);
     ylabel('Time (min)', 'FontSize', 12);
     title('Tangential Flow Directionality (μm/s)', 'FontSize', 14);
 
@@ -360,7 +373,7 @@ if makeEnhancedKymographs
     cb = colorbar;
     ylabel(cb, 'v_\theta (μm/s): red=CCW, blue=CW', 'FontSize', 10);
     set(gca, 'FontSize', 11);
-    exportgraphics(fig3, fullfile(outDir,'kymograph_vtheta_directional.png'), 'Resolution', 300);
+    exportgraphics(fig3, fullfile(outDir_kymographs,'kymograph_vtheta_directional.png'), 'Resolution', 300);
 
     fprintf('  - Saved 3 kymograph variants\n');
 end
@@ -449,20 +462,20 @@ if makeQuiverOverlays
         caxis([min(vtheta, [], 'omitnan'), max(vtheta, [], 'omitnan')]);
         ylabel(cb, 'v_\theta (μm/s)', 'FontSize', 10, 'Color', 'w');
 
-        exportgraphics(figQ, fullfile(outDir, sprintf('quiver_tangential_fr%04d.png', fr)), ...
+        exportgraphics(figQ, fullfile(outDir_quiver, sprintf('quiver_tangential_fr%04d.png', fr)), ...
             'Resolution', 200);
         close(figQ);
     end
 
-    fprintf('  - Saved %d quiver overlays\n', numel(1:quiverEveryNFrames:nFrames));
+    fprintf('  - Saved %d quiver overlays to %s\n', numel(1:quiverEveryNFrames:nFrames), outDir_quiver);
 end
 
-% --- 5) SNAPSHOT DETAILED VISUALIZATIONS ---
-if makeSnapshotPlots && ~isempty(snapshotFrames)
-    fprintf('  - Generating snapshot plots...\n');
+% --- 5) SNAPSHOT DETAILED VISUALIZATIONS (Tangential Flow Analysis) ---
+if makeSnapshotPlots
+    fprintf('  - Generating tangential flow analysis plots (every %d frames)...\n', snapshotEveryNFrames);
 
-    for fr = snapshotFrames
-        if fr > nFrames || ~qcFlag(fr), continue; end
+    for fr = 1:snapshotEveryNFrames:nFrames
+        if ~qcFlag(fr), continue; end
 
         I = visImageSeq{fr};
         poly = visPolySeq{fr};
@@ -485,19 +498,19 @@ if makeSnapshotPlots && ~isempty(snapshotFrames)
 
         % Panel 2: Tangential velocity profile
         subplot(2,3,2);
-        plot(rad2deg(thetaCenters), vtheta, 'b-', 'LineWidth', 2);
-        xlabel('\theta (deg)'); ylabel('v_\theta (μm/s)');
+        plot(1:nThetaBins, vtheta, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 8);
+        xlabel('Angular Bin Number'); ylabel('v_\theta (μm/s)');
         title('Tangential Velocity Profile');
         grid on;
-        xlim([0 360]);
+        xlim([1 nThetaBins]);
 
         % Panel 3: Curvature profile
         subplot(2,3,3);
-        plot(rad2deg(thetaCenters(1:end-1)), radius_curv, 'r-', 'LineWidth', 2);
-        xlabel('\theta (deg)'); ylabel('Radius of Curvature (px)');
+        plot(1:nThetaBins-1, radius_curv, 'r.-', 'LineWidth', 1.5, 'MarkerSize', 8);
+        xlabel('Angular Bin Number'); ylabel('Radius of Curvature (px)');
         title('Boundary Curvature');
         grid on;
-        xlim([0 360]);
+        xlim([1 nThetaBins-1]);
 
         % Panel 4: Polar plot of tangential velocity
         subplot(2,3,4);
@@ -512,7 +525,7 @@ if makeSnapshotPlots && ~isempty(snapshotFrames)
         polarplot(thetaCenters(pos_idx), vtheta(pos_idx), 'r.', 'MarkerSize', 8); hold on;
         polarplot(thetaCenters(neg_idx), abs(vtheta(neg_idx)), 'b.', 'MarkerSize', 8);
         title('v_\theta Directionality');
-        legend({'CCW (+)', 'CW (-)'}, 'Location', 'best');
+        legend({'CCW (+)', 'CW (-)'}, 'Location', 'northeast');  % Top right corner
 
         % Panel 6: Statistics
         subplot(2,3,6); axis off;
@@ -538,12 +551,13 @@ if makeSnapshotPlots && ~isempty(snapshotFrames)
 
         sgtitle(sprintf('Tangential Flow Analysis - Frame %d', fr), 'FontSize', 14, 'FontWeight', 'bold');
 
-        exportgraphics(figSnap, fullfile(outDir, sprintf('snapshot_analysis_fr%04d.png', fr)), ...
+        exportgraphics(figSnap, fullfile(outDir_snapshots, sprintf('tangential_flow_analysis_fr%04d.png', fr)), ...
             'Resolution', 200);
         close(figSnap);
     end
 
-    fprintf('  - Saved %d snapshot visualizations\n', numel(snapshotFrames));
+    nSavedSnapshots = numel(1:snapshotEveryNFrames:nFrames);
+    fprintf('  - Saved %d tangential flow analysis plots to %s\n', nSavedSnapshots, outDir_snapshots);
 end
 
 fprintf('All visualizations complete!\n\n');
@@ -793,30 +807,26 @@ if L < 50
     return;
 end
 
-% Periodic spline fit for smooth tangent calculation
-useCsape = exist('csape','file') == 2;
-if useCsape
-    ppx = csape(s, xb, 'periodic');
-    ppy = csape(s, yb, 'periodic');
-    dppx = fnder(ppx,1);
-    dppy = fnder(ppy,1);
-    sDense = linspace(0,L,nDenseSpline);
-    xDense = fnval(ppx, sDense);
-    yDense = fnval(ppy, sDense);
-    tx = fnval(dppx, sDense);
-    ty = fnval(dppy, sDense);
-else
-    % Fallback: periodic-like smoothing using wrapped indexing + spline interpolation
-    n0 = numel(xb);
-    xw = [xb; xb(2:end-1)];
-    yw = [yb; yb(2:end-1)];
-    sw = linspace(0,1,numel(xw))';
-    sDense = linspace(0,1,nDenseSpline);
-    xDense = interp1(sw, xw, sDense, 'spline');
-    yDense = interp1(sw, yw, sDense, 'spline');
-    % Tangent via numerical derivative (strict: ∂r/∂s)
-    tx = gradient(xDense);
-    ty = gradient(yDense);
+% Simple finite difference tangent calculation (centered differences)
+% Faster and doesn't require Curve Fitting Toolbox
+% Densely sample boundary using linear interpolation
+tSample = linspace(0, 1, nDenseSpline);
+xDense = interp1(linspace(0,1,numel(xb)), xb, tSample, 'linear');
+yDense = interp1(linspace(0,1,numel(yb)), yb, tSample, 'linear');
+
+nPts = numel(xDense);
+tx = zeros(nPts, 1);
+ty = zeros(nPts, 1);
+
+% Centered finite difference with periodic boundary conditions
+for i = 1:nPts
+    i_prev = mod(i-2, nPts) + 1;  % wrap around for i=1
+    i_next = mod(i, nPts) + 1;     % wrap around for i=nPts
+
+    % Tangent = (next_point - prev_point) / 2
+    % This approximates dr/ds using centered difference
+    tx(i) = (xDense(i_next) - xDense(i_prev)) / 2;
+    ty(i) = (yDense(i_next) - yDense(i_prev)) / 2;
 end
 
 % Normalize tangent to unit vector (strict physical encoding: t̂)
