@@ -418,6 +418,15 @@ if makeQuiverOverlays
         uq = zeros(nQuiver, 1);
         vq = zeros(nQuiver, 1);
 
+        % Get max velocity for normalization (makes arrows visible)
+        vmax_frame = max(abs(vtheta), [], 'omitnan');
+        if isnan(vmax_frame) || vmax_frame == 0
+            vmax_frame = 1;
+        end
+
+        % Arrow length in pixels (adjust quiverScale to change)
+        arrowLengthPx = 40 * quiverScale;
+
         for k = 1:nQuiver
             idx = thetaSubsample(k);
             theta_k = thetaCenters(idx);
@@ -425,22 +434,19 @@ if makeQuiverOverlays
 
             if isnan(vtheta_k), continue; end
 
-            % Position on boundary (approximate using polar coordinates from center)
-            % Use mean radius for visualization
+            % Position on boundary
             R_mean = mean(RADIUS_OF_CURVATURE(fr, :), 'omitnan');
-            if isnan(R_mean), R_mean = 100; end  % fallback
+            if isnan(R_mean), R_mean = 100; end
 
             xq(k) = xc + R_mean * cos(theta_k);
             yq(k) = yc + R_mean * sin(theta_k);
 
             % Tangent vector (perpendicular to radial direction)
-            % For counterclockwise tangent: rotate radial vector by 90 degrees
-            tx = -sin(theta_k);  % tangent x component
-            ty = cos(theta_k);   % tangent y component
+            tx = -sin(theta_k);
+            ty = cos(theta_k);
 
-            % Scale by velocity (convert to pixels for visualization)
-            % vtheta_k is in μm/s, convert to pixels for arrow length
-            arrow_scale = quiverScale * vtheta_k / px_per_um;  % pixels
+            % Scale arrow by velocity (normalized so max velocity = arrowLengthPx)
+            arrow_scale = arrowLengthPx * (vtheta_k / vmax_frame);
 
             uq(k) = arrow_scale * tx;
             vq(k) = arrow_scale * ty;
