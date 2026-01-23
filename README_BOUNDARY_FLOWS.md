@@ -54,12 +54,12 @@ The script generates comprehensive visualizations to analyze tangential cortical
 
 ### 1. Kymographs (3 variants)
 
-Kymographs are spatiotemporal maps showing how tangential velocity v_θ varies with angular bin number (horizontal axis) and time (vertical axis). Data is averaged within each angular bin for robust visualization.
+Kymographs are spatiotemporal maps showing how tangential velocity v_θ varies with angle (horizontal axis) and time (vertical axis). Data is averaged within angular bins for robust visualization.
 
 #### Signed Kymograph
 - **File**: `kymographs/kymograph_vtheta_signed.png`
 - **Colormap**: Parula (standard)
-- **X-axis**: Angular bin number (1-101), each bin spans ~3.6 degrees
+- **X-axis**: Angle in degrees (0° to 360°)
 - **Y-axis**: Time (minutes)
 - **Shows**: Raw signed velocity (positive/negative values)
 - **What to look for**:
@@ -71,7 +71,7 @@ Kymographs are spatiotemporal maps showing how tangential velocity v_θ varies w
 #### Magnitude Kymograph
 - **File**: `kymographs/kymograph_vtheta_magnitude.png`
 - **Colormap**: Hot (black → red → yellow → white)
-- **X-axis**: Angular bin number (1-101)
+- **X-axis**: Angle in degrees (0° to 360°)
 - **Y-axis**: Time (minutes)
 - **Shows**: Absolute velocity values |v_θ| (ignores direction)
 - **What to look for**:

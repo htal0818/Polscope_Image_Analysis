@@ -327,10 +327,10 @@ time_min = (0:nFrames-1) * (dt_sec/60);
 fprintf('Generating visualizations...\n');
 
 % --- 1) BASIC SIGNED KYMOGRAPH (original) ---
-fig1 = figure('Position', [100 100 1000 600]);
-imagesc(1:nThetaBins, time_min, Vtheta_kymo);
+fig1 = figure('Position', [100 100 1000 600], 'Visible', 'off');
+imagesc(rad2deg(thetaCenters), time_min, Vtheta_kymo);
 axis tight;
-xlabel('Angular Bin Number', 'FontSize', 12);
+xlabel('Angle (degrees)', 'FontSize', 12);
 ylabel('Time (min)', 'FontSize', 12);
 title('Tangential Cortical Flow v_\theta(\theta,t) - Signed (μm/s)', 'FontSize', 14);
 colormap(gca, 'parula');
@@ -341,10 +341,10 @@ exportgraphics(fig1, fullfile(outDir_kymographs,'kymograph_vtheta_signed.png'), 
 
 if makeEnhancedKymographs
     % --- 2) MAGNITUDE KYMOGRAPH (absolute values) ---
-    fig2 = figure('Position', [100 100 1000 600]);
-    imagesc(1:nThetaBins, time_min, abs(Vtheta_kymo));
+    fig2 = figure('Position', [100 100 1000 600], 'Visible', 'off');
+    imagesc(rad2deg(thetaCenters), time_min, abs(Vtheta_kymo));
     axis tight;
-    xlabel('Angular Bin Number', 'FontSize', 12);
+    xlabel('Angle (degrees)', 'FontSize', 12);
     ylabel('Time (min)', 'FontSize', 12);
     title('Tangential Flow Magnitude |v_\theta(\theta,t)| (μm/s)', 'FontSize', 14);
     colormap(gca, 'hot');
@@ -354,10 +354,10 @@ if makeEnhancedKymographs
     exportgraphics(fig2, fullfile(outDir_kymographs,'kymograph_vtheta_magnitude.png'), 'Resolution', 300);
 
     % --- 3) DIRECTIONAL KYMOGRAPH (diverging colormap) ---
-    fig3 = figure('Position', [100 100 1000 600]);
-    imagesc(1:nThetaBins, time_min, Vtheta_kymo);
+    fig3 = figure('Position', [100 100 1000 600], 'Visible', 'off');
+    imagesc(rad2deg(thetaCenters), time_min, Vtheta_kymo);
     axis tight;
-    xlabel('Angular Bin Number', 'FontSize', 12);
+    xlabel('Angle (degrees)', 'FontSize', 12);
     ylabel('Time (min)', 'FontSize', 12);
     title('Tangential Flow Directionality (μm/s)', 'FontSize', 14);
 
@@ -498,19 +498,19 @@ if makeSnapshotPlots
 
         % Panel 2: Tangential velocity profile
         subplot(2,3,2);
-        plot(1:nThetaBins, vtheta, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 8);
-        xlabel('Angular Bin Number'); ylabel('v_\theta (μm/s)');
+        plot(rad2deg(thetaCenters), vtheta, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 8);
+        xlabel('Angle (degrees)'); ylabel('v_\theta (μm/s)');
         title('Tangential Velocity Profile');
         grid on;
-        xlim([1 nThetaBins]);
+        xlim([0 360]);
 
         % Panel 3: Curvature profile
         subplot(2,3,3);
-        plot(1:nThetaBins-1, radius_curv, 'r.-', 'LineWidth', 1.5, 'MarkerSize', 8);
-        xlabel('Angular Bin Number'); ylabel('Radius of Curvature (px)');
+        plot(rad2deg(thetaCenters(1:end-1)), radius_curv, 'r.-', 'LineWidth', 1.5, 'MarkerSize', 8);
+        xlabel('Angle (degrees)'); ylabel('Radius of Curvature (px)');
         title('Boundary Curvature');
         grid on;
-        xlim([1 nThetaBins-1]);
+        xlim([0 360]);
 
         % Panel 4: Polar plot of tangential velocity
         subplot(2,3,4);
@@ -807,32 +807,25 @@ if L < 50
     return;
 end
 
-% Simple finite difference tangent calculation (centered differences)
-% Faster and doesn't require Curve Fitting Toolbox
-% Densely sample boundary using linear interpolation
-tSample = linspace(0, 1, nDenseSpline);
-xDense = interp1(linspace(0,1,numel(xb)), xb, tSample, 'linear');
-yDense = interp1(linspace(0,1,numel(yb)), yb, tSample, 'linear');
+% Polar coordinate tangent calculation (standard for SCW analysis)
+% Reference: Bement et al. Trends Cell Biol 2015; Maître et al. Nature 2012
+% In polar coordinates centered at (xc, yc):
+%   Radial unit vector: r̂ = (cos θ, sin θ)
+%   Tangent unit vector (CCW): t̂ = (-sin θ, cos θ)  [perpendicular to radial]
+%
+% This is the STANDARD convention for cortical flow analysis
 
-nPts = numel(xDense);
-tx = zeros(nPts, 1);
-ty = zeros(nPts, 1);
+% Dense angular sampling around the oocyte
+thetaDense = linspace(0, 2*pi, nDenseSpline);
 
-% Centered finite difference with periodic boundary conditions
-for i = 1:nPts
-    i_prev = mod(i-2, nPts) + 1;  % wrap around for i=1
-    i_next = mod(i, nPts) + 1;     % wrap around for i=nPts
+% Tangent vectors directly from polar geometry (already unit vectors)
+tx = -sin(thetaDense(:));  % x-component of unit tangent (CCW direction)
+ty = cos(thetaDense(:));   % y-component of unit tangent
 
-    % Tangent = (next_point - prev_point) / 2
-    % This approximates dr/ds using centered difference
-    tx(i) = (xDense(i_next) - xDense(i_prev)) / 2;
-    ty(i) = (yDense(i_next) - yDense(i_prev)) / 2;
-end
-
-% Normalize tangent to unit vector (strict physical encoding: t̂)
-tN = hypot(tx,ty) + eps;
-tx = tx./tN;
-ty = ty./tN;
+% Positions on boundary for visualization
+% Interpolate boundary polygon to match dense angular sampling
+xDense = interp1(linspace(0, 2*pi, numel(xb)), xb, thetaDense, 'linear', 'extrap');
+yDense = interp1(linspace(0, 2*pi, numel(yb)), yb, thetaDense, 'linear', 'extrap');
 
 % Define cortical band using distance-to-perimeter inside BW
 % This ensures we only sample velocities within the cortical region
@@ -857,21 +850,20 @@ end
 xq = X(inBand); yq = Y(inBand);
 uq = U_um_s(inBand); vq = V_um_s(inBand);
 
-% Nearest point on dense boundary samples (brute-force; PIV grids are small)
-idxNearest = nearest_dense_points(xq, yq, xDense, yDense);
+% ANGLE-BASED TANGENT ASSIGNMENT (matches SCW analysis convention)
+% Compute angle of each PIV point relative to oocyte centroid
+cx = centroid(1); cy = centroid(2);
+th = atan2(yq - cy, xq - cx);  % angle of each PIV point
+th = wrapTo2Pi(th);
 
-tqx = tx(idxNearest);
-tqy = ty(idxNearest);
+% Tangent vectors at each PIV point's angular position (polar formulation)
+% t̂(θ) = (-sin θ, cos θ)  [perpendicular to radial, CCW direction]
+tqx = -sin(th);  % x-component of unit tangent at PIV point angle
+tqy = cos(th);   % y-component of unit tangent at PIV point angle
 
 % STRICT PHYSICAL ENCODING: tangential component = v · t̂
-% where v = (u, v) is velocity vector, t̂ = (tx, ty) is unit tangent
+% where v = (u, v) is velocity vector, t̂ = (tqx, tqy) is unit tangent
 vT = uq.*tqx + vq.*tqy;  % tangential velocity [um/s]
-
-% Theta coordinate assigned from nearest boundary point relative to centroid
-% This maintains angular position consistency with curvature calculation
-cx = centroid(1); cy = centroid(2);
-th = atan2(yDense(idxNearest) - cy, xDense(idxNearest) - cx);
-th = wrapTo2Pi(th);
 
 % Bin into theta bins (angular averaging)
 vBins = nan(1,nThetaBins);
