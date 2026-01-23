@@ -94,29 +94,61 @@ Kymographs are spatiotemporal maps showing how tangential velocity v_θ varies w
   - **Red-blue asymmetry**: Net angular momentum (more red = net CCW rotation)
 - **Biological interpretation**: Distinguishes contractile (converging) vs. expansive (diverging) flows, reveals flow symmetry breaking during polarization or division
 
-### 2. Quiver Overlays
+### 2. Enhanced Flow Overlays (Color-coded Boundary + Cortical Band Heatmap)
 
-- **Files**: `quiver_overlays/quiver_tangential_fr####.png` (every N frames)
-- **Shows**: Color-coded arrows representing tangential flow vectors overlaid on grayscale oocyte image
-- **Color coding**:
-  - **Red arrows**: Counterclockwise (CCW, positive) flows
-  - **Blue arrows**: Clockwise (CW, negative) flows
-  - **Cyan line**: Oocyte boundary
-- **Arrow direction**: Points along the tangent to the boundary using polar formulation t̂ = (-sin θ, cos θ)
-- **Arrow length**: Proportional to flow speed (longer = faster flow)
+- **Files**: `quiver_overlays/flow_overlay_fr####.png` (every N frames)
+- **Shows**: Multi-layered visualization combining three complementary views
+
+#### Layer 1: Grayscale Image (Background)
+- Original PolScope image provides anatomical context
+- Allows correlation of flows with cellular structures
+
+#### Layer 2: Semi-transparent Cortical Band Heatmap
+- **What it shows**: Each pixel in the cortical band (3-12 px inside boundary) colored by the tangential velocity at that angular position
+- **Colormap**: Red-white-blue diverging (red=CCW, white=zero, blue=CW)
+- **Transparency**: 60% opacity so underlying image is visible
 - **What to look for**:
-  - **Arrow convergence**: Regions where flows point toward each other (contraction zones, potential furrow sites)
-  - **Arrow divergence**: Regions where flows point away from each other (expansion zones)
-  - **Color transitions**: Where red meets blue indicates flow direction changes
-  - **Uniform arrows**: Coherent rotational flow (like a spinning disk)
-- **Biological interpretation**: Visualizes local cortical flow direction and speed. Red/blue color-coding immediately shows flow directionality without needing to interpret arrow directions.
+  - **Red regions**: Areas with counterclockwise (positive) tangential flow
+  - **Blue regions**: Areas with clockwise (negative) tangential flow
+  - **White regions**: Areas with minimal tangential flow (flow is radial or zero)
+  - **Sharp color boundaries**: Indicates where flow direction reverses
+  - **Gradient patterns**: Shows smooth transitions vs abrupt flow changes
+
+#### Layer 3: Color-coded Boundary Line
+- **What it shows**: Thick (4 px) boundary line where each segment is colored by local tangential velocity
+- **Colormap**: Same red-white-blue as cortical band (consistent interpretation)
+- **What to look for**:
+  - **Color gradient around boundary**: Shows how flow varies angularly
+  - **Symmetric patterns**: Bipolar (red-blue-red-blue) suggests organized contractile activity
+  - **Localized hot spots**: Strong CCW or CW flow at specific angular positions
+  - **Color continuity**: Smooth vs discontinuous flow fields
+
+#### Layer 4: Sparse Directional Arrows (~12 arrows)
+- **What it shows**: White arrows (with black outline for visibility) showing tangential flow direction
+- **Spacing**: ~12 arrows around the boundary (every ~30°)
+- **Arrow direction**: Points along tangent using polar formula t̂ = (-sin θ, cos θ)
+- **What to look for**:
+  - **Arrow convergence**: Flows pointing toward each other (contraction zone, potential furrow site)
+  - **Arrow divergence**: Flows pointing away from each other (expansion zone)
+  - **Arrow alignment**: Coherent vs chaotic flow patterns
+
+#### Additional Elements
+- **White/black crosshair**: Oocyte centroid (center of polar coordinate system)
+- **Colorbar**: Shows velocity scale (μm/s) with CCW (red) and CW (blue) labels
+- **Info box**: Displays cortical band parameters and max velocity for the frame
+
+**Biological interpretation**: This multi-layered visualization immediately shows:
+1. **WHERE** cortical flows are strongest (brightness/saturation of colors)
+2. **WHICH DIRECTION** flows are moving (red = CCW vs blue = CW)
+3. **WHERE** flow reverses direction (color boundaries)
+4. **HOW** flows relate to oocyte anatomy (overlay on image)
+5. **SPATIAL EXTENT** of active cortical region (heatmap coverage)
 
 **Parameters**:
 ```matlab
 makeQuiverOverlays = true;   % Enable/disable
 quiverEveryNFrames = 10;     % Save every Nth frame
-quiverSubsample = 3;         % Show every 3rd angular bin (reduces clutter)
-quiverScale = 1.5;           % Arrow length scaling
+% Note: Arrow density is now fixed at ~12 arrows for clarity
 ```
 
 ### 3. Tangential Flow Analysis Plots (6-Panel Snapshots)
@@ -394,8 +426,8 @@ All visualizations are saved in organized subdirectories within `tangential_kymo
 - `kymograph_vtheta_magnitude.png` - Absolute velocity |v_θ| with hot colormap
 - `kymograph_vtheta_directional.png` - Directional flow with red-blue diverging colormap
 
-**Quiver overlays** (`quiver_overlays/`, every 10 frames):
-- `quiver_tangential_fr####.png` - Green arrows showing flow direction and magnitude on boundary
+**Enhanced flow overlays** (`quiver_overlays/`, every 10 frames):
+- `flow_overlay_fr####.png` - Multi-layered visualization: cortical band heatmap + color-coded boundary + sparse arrows
 
 **Tangential flow analysis** (`snapshots/`, every 2 frames):
 - `tangential_flow_analysis_fr####.png` - 6-panel analysis: image, profiles, polar plots, statistics
@@ -411,8 +443,8 @@ tangential_kymo_out/
 │   ├── kymograph_vtheta_magnitude.png
 │   └── kymograph_vtheta_directional.png
 ├── quiver_overlays/
-│   ├── quiver_tangential_fr0001.png
-│   ├── quiver_tangential_fr0011.png
+│   ├── flow_overlay_fr0001.png
+│   ├── flow_overlay_fr0011.png
 │   └── ...
 ├── snapshots/
 │   ├── tangential_flow_analysis_fr0001.png
@@ -590,11 +622,17 @@ boundary_flows.m - Curvature-based boundary reconstruction with strict physical 
 
 ### Version History
 
-**v2.1 - January 2026** (Latest)
+**v2.2 - January 2026** (Latest)
+- **Enhanced flow overlays**: New multi-layered visualization combining:
+  - Semi-transparent cortical band heatmap (shows velocity in sampling region)
+  - Color-coded boundary line (velocity mapped to boundary color)
+  - Sparse directional arrows (~12 arrows for clarity)
+- **Improved colorbar**: Positioned outside image with CCW/CW labels
+
+**v2.1 - January 2026**
 - **Polar tangent formulation**: Replaced finite-difference tangent calculation with polar formula t̂ = (-sin θ, cos θ) matching SCW analysis literature (Bement et al. 2015, Maître et al. 2012)
 - **PIV mapping improvement**: Each PIV vector now uses tangent at its own angular position (not nearest boundary point)
 - **Kymograph x-axis**: Changed from bin numbers to degrees (0-360°) for better interpretability
-- **Quiver overlay fix**: Color-coded arrows (red=CCW, blue=CW) with proper boundary visualization
 - **Snapshot plots**: Updated to show angles in degrees
 
 **v2.0 - January 2026**

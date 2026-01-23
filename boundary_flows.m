@@ -378,9 +378,15 @@ if makeEnhancedKymographs
     fprintf('  - Saved 3 kymograph variants\n');
 end
 
-% --- 4) QUIVER OVERLAYS (tangential flow vectors on boundary) ---
+% --- 4) ENHANCED FLOW OVERLAYS (Color-coded boundary + cortical band heatmap) ---
 if makeQuiverOverlays
-    fprintf('  - Generating quiver overlays...\n');
+    fprintf('  - Generating enhanced flow overlays (Option A + D)...\n');
+
+    % Pre-compute global velocity range for consistent colormap across frames
+    vmax_global = max(abs(Vtheta_kymo(:)), [], 'omitnan');
+    if isnan(vmax_global) || vmax_global == 0
+        vmax_global = 1;  % Fallback
+    end
 
     for fr = 1:quiverEveryNFrames:nFrames
         if ~qcFlag(fr), continue; end
@@ -394,115 +400,198 @@ if makeQuiverOverlays
         yc = centroidXY(fr, 2);
         vtheta = Vtheta_kymo(fr, :);
 
-        % Create figure with grayscale image
-        figQ = figure('Visible', 'off', 'Position', [100 100 800 800]);
-        imagesc(I); colormap(gray); axis image; hold on;
-        set(gca, 'YDir', 'reverse');  % Match image coordinates
+        [H, W] = size(I);
 
-        % Plot boundary as a thin line (not filled polygon)
-        if ~isempty(poly) && size(poly, 1) > 2
-            plot(poly(:,1), poly(:,2), 'c-', 'LineWidth', 1.5);  % Cyan boundary line
+        % Create figure
+        figQ = figure('Visible', 'off', 'Position', [100 100 900 800]);
+
+        % =========================================================================
+        % OPTION D: Semi-transparent cortical band heatmap
+        % Color each pixel in the cortical band by its angular bin's velocity
+        % =========================================================================
+
+        % Recreate the cortical band mask for this frame
+        % Use the stored mask data - reconstruct BW from poly
+        BW_frame = poly2mask(poly(:,1), poly(:,2), H, W);
+        BW_frame = imfill(BW_frame, 'holes');
+
+        per_frame = bwperim(BW_frame);
+        D_frame = bwdist(per_frame);
+
+        % Cortical band: pixels inside BW, between bandOuterPx and bandInnerPx from edge
+        cortical_band = BW_frame & (D_frame >= bandOuterPx) & (D_frame <= bandInnerPx);
+
+        % Create velocity image: assign velocity to each pixel based on its angle
+        velocity_image = nan(H, W);
+        [yy, xx] = find(cortical_band);
+
+        for p = 1:numel(xx)
+            % Compute angle of this pixel relative to centroid
+            theta_pixel = atan2(yy(p) - yc, xx(p) - xc);
+            theta_pixel = wrapTo2Pi(theta_pixel);
+
+            % Find which angular bin this pixel belongs to
+            bin_idx = discretize(theta_pixel, thetaBinEdges);
+            if ~isempty(bin_idx) && bin_idx >= 1 && bin_idx <= nThetaBins
+                velocity_image(yy(p), xx(p)) = vtheta(bin_idx);
+            end
         end
 
-        % Plot centroid marker
-        plot(xc, yc, 'w+', 'MarkerSize', 10, 'LineWidth', 2);
+        % Display grayscale image as base
+        ax = axes('Position', [0.08 0.1 0.75 0.85]);
+        imagesc(I); colormap(ax, gray(256)); axis image; hold on;
+        set(ax, 'YDir', 'reverse');
+
+        % Overlay the velocity heatmap with transparency
+        % Create RGB image from velocity data using redblue colormap
+        cmap_rb = redblue(256);
+        velocity_normalized = (velocity_image + vmax_global) / (2 * vmax_global);  % Map to [0,1]
+        velocity_normalized = max(0, min(1, velocity_normalized));  % Clamp
+
+        % Convert to RGB
+        velocity_rgb = zeros(H, W, 3);
+        for c = 1:3
+            channel = zeros(H, W);
+            valid_pixels = ~isnan(velocity_image);
+            idx = round(velocity_normalized(valid_pixels) * 255) + 1;
+            idx = max(1, min(256, idx));
+            channel(valid_pixels) = cmap_rb(idx, c);
+            velocity_rgb(:,:,c) = channel;
+        end
+
+        % Overlay with transparency (only where cortical band exists)
+        h_overlay = image(velocity_rgb);
+        alpha_mask = 0.6 * double(cortical_band);  % 60% opacity in cortical band
+        set(h_overlay, 'AlphaData', alpha_mask);
 
         % =========================================================================
-        % QUIVER ARROWS: Position on actual boundary, use polar tangent formula
+        % OPTION A: Color-coded boundary line by local velocity
+        % Draw boundary segments colored by tangential velocity
         % =========================================================================
 
-        % Subsample angular positions
-        thetaSubsample = 1:quiverSubsample:nThetaBins;
-        nQuiver = numel(thetaSubsample);
-
-        xq = zeros(nQuiver, 1);
-        yq = zeros(nQuiver, 1);
-        uq = zeros(nQuiver, 1);
-        vq = zeros(nQuiver, 1);
-        vq_colors = zeros(nQuiver, 1);  % For color-coding by velocity
-
-        % Compute boundary points at each sampled angle
+        % Compute angles for boundary points
         theta_poly = atan2(poly(:,2) - yc, poly(:,1) - xc);
         theta_poly = wrapTo2Pi(theta_poly);
 
-        for k = 1:nQuiver
+        % For each boundary segment, assign color based on velocity at that angle
+        nPoly = size(poly, 1);
+        for k = 1:nPoly-1
+            % Midpoint angle of this segment
+            theta_mid = (theta_poly(k) + theta_poly(k+1)) / 2;
+            if abs(theta_poly(k) - theta_poly(k+1)) > pi  % Handle wrap-around
+                theta_mid = wrapTo2Pi(theta_mid + pi);
+            end
+
+            % Find velocity bin for this angle
+            bin_idx = discretize(theta_mid, thetaBinEdges);
+            if isempty(bin_idx) || bin_idx < 1 || bin_idx > nThetaBins
+                seg_color = [0.5 0.5 0.5];  % Gray for undefined
+            else
+                v_seg = vtheta(bin_idx);
+                if isnan(v_seg)
+                    seg_color = [0.5 0.5 0.5];
+                else
+                    % Map velocity to color using redblue colormap
+                    v_norm = (v_seg + vmax_global) / (2 * vmax_global);
+                    v_norm = max(0, min(1, v_norm));
+                    cmap_idx = round(v_norm * 255) + 1;
+                    cmap_idx = max(1, min(256, cmap_idx));
+                    seg_color = cmap_rb(cmap_idx, :);
+                end
+            end
+
+            % Draw this boundary segment with its velocity color
+            plot([poly(k,1) poly(k+1,1)], [poly(k,2) poly(k+1,2)], ...
+                '-', 'Color', seg_color, 'LineWidth', 4);
+        end
+
+        % Close the boundary (last point to first)
+        theta_mid = (theta_poly(end) + theta_poly(1)) / 2;
+        bin_idx = discretize(wrapTo2Pi(theta_mid), thetaBinEdges);
+        if ~isempty(bin_idx) && bin_idx >= 1 && bin_idx <= nThetaBins && ~isnan(vtheta(bin_idx))
+            v_norm = (vtheta(bin_idx) + vmax_global) / (2 * vmax_global);
+            v_norm = max(0, min(1, v_norm));
+            cmap_idx = round(v_norm * 255) + 1;
+            cmap_idx = max(1, min(256, cmap_idx));
+            seg_color = cmap_rb(cmap_idx, :);
+        else
+            seg_color = [0.5 0.5 0.5];
+        end
+        plot([poly(end,1) poly(1,1)], [poly(end,2) poly(1,2)], ...
+            '-', 'Color', seg_color, 'LineWidth', 4);
+
+        % =========================================================================
+        % SPARSE QUIVER ARROWS for directionality (every 30 degrees = 12 arrows)
+        % =========================================================================
+        quiver_sparse = 8;  % Show arrow every ~30 degrees (101 bins / 12 ≈ 8)
+        thetaSubsample = 1:quiver_sparse:nThetaBins;
+
+        for k = 1:numel(thetaSubsample)
             idx = thetaSubsample(k);
             theta_k = thetaCenters(idx);
             vtheta_k = vtheta(idx);
 
-            if isnan(vtheta_k), continue; end
+            if isnan(vtheta_k) || abs(vtheta_k) < 0.001, continue; end
 
             % Find nearest boundary point at this angle
             [~, nearest_idx] = min(abs(wrapTo2Pi(theta_poly) - wrapTo2Pi(theta_k)));
-            xq(k) = poly(nearest_idx, 1);
-            yq(k) = poly(nearest_idx, 2);
+            xq = poly(nearest_idx, 1);
+            yq = poly(nearest_idx, 2);
 
-            % Tangent vector using polar formulation: t̂ = (-sin θ, cos θ)
+            % Tangent vector using polar formulation
             tx = -sin(theta_k);
             ty = cos(theta_k);
 
-            % Scale by velocity magnitude (convert to pixels for visualization)
-            % Arrow length proportional to tangential velocity
-            arrow_scale = quiverScale * abs(vtheta_k) * px_per_um * dt_sec;  % pixels
-            arrow_scale = min(arrow_scale, 50);  % Cap arrow length for visibility
+            % Arrow scale (moderate size)
+            arrow_len = 25 * sign(vtheta_k);  % Fixed length, direction by sign
+            uq = arrow_len * tx;
+            vq = arrow_len * ty;
 
-            % Direction determined by sign of vtheta_k
-            uq(k) = sign(vtheta_k) * arrow_scale * tx;
-            vq(k) = sign(vtheta_k) * arrow_scale * ty;
-            vq_colors(k) = vtheta_k;
+            % Draw arrow (white with black outline for visibility)
+            quiver(xq, yq, uq, vq, 0, 'Color', 'k', 'LineWidth', 2.5, ...
+                'MaxHeadSize', 1.5, 'AutoScale', 'off');
+            quiver(xq, yq, uq, vq, 0, 'Color', 'w', 'LineWidth', 1.5, ...
+                'MaxHeadSize', 1.2, 'AutoScale', 'off');
         end
 
-        % Remove entries where velocity was NaN
-        valid = ~isnan(vq_colors) & (uq ~= 0 | vq ~= 0);
-        xq = xq(valid); yq = yq(valid);
-        uq = uq(valid); vq = vq(valid);
-        vq_colors = vq_colors(valid);
+        % Plot centroid marker
+        plot(xc, yc, 'w+', 'MarkerSize', 12, 'LineWidth', 2);
+        plot(xc, yc, 'k+', 'MarkerSize', 10, 'LineWidth', 1);
 
-        if ~isempty(xq)
-            % Color-code arrows by velocity sign (red=CCW, blue=CW)
-            % Plot positive (CCW) and negative (CW) arrows separately
-            pos_mask = vq_colors > 0;
-            neg_mask = vq_colors < 0;
-
-            % CCW flows (positive) - red arrows
-            if any(pos_mask)
-                quiver(xq(pos_mask), yq(pos_mask), uq(pos_mask), vq(pos_mask), 0, ...
-                    'Color', [1 0.2 0.2], 'LineWidth', 1.5, 'MaxHeadSize', 0.8);
-            end
-
-            % CW flows (negative) - blue arrows
-            if any(neg_mask)
-                quiver(xq(neg_mask), yq(neg_mask), uq(neg_mask), vq(neg_mask), 0, ...
-                    'Color', [0.2 0.4 1], 'LineWidth', 1.5, 'MaxHeadSize', 0.8);
-            end
-        end
-
-        % Title and legend
+        % Title
         title(sprintf('Frame %d: Tangential Flow (t=%.2f min)', fr, time_min(fr)), ...
-            'FontSize', 12, 'Color', 'k');
-
-        % Add legend for arrow colors
-        h1 = plot(NaN, NaN, '-', 'Color', [1 0.2 0.2], 'LineWidth', 2);
-        h2 = plot(NaN, NaN, '-', 'Color', [0.2 0.4 1], 'LineWidth', 2);
-        h3 = plot(NaN, NaN, 'c-', 'LineWidth', 1.5);
-        legend([h1 h2 h3], {'CCW (+)', 'CW (-)', 'Boundary'}, ...
-            'Location', 'northeast', 'FontSize', 9);
-
-        % Add velocity scale bar info in corner
-        vmax = max(abs(vtheta), [], 'omitnan');
-        if ~isnan(vmax) && vmax > 0
-            text(10, size(I,1)-20, sprintf('Max |v_\\theta| = %.2f μm/s', vmax), ...
-                'Color', 'w', 'FontSize', 9, 'BackgroundColor', [0 0 0 0.5]);
-        end
+            'FontSize', 13, 'FontWeight', 'bold');
 
         axis off;
 
-        exportgraphics(figQ, fullfile(outDir_quiver, sprintf('quiver_tangential_fr%04d.png', fr)), ...
-            'Resolution', 200);
+        % =========================================================================
+        % COLORBAR (positioned outside image area)
+        % =========================================================================
+        cb_ax = axes('Position', [0.86 0.15 0.03 0.7]);
+        imagesc(cb_ax, 1, linspace(-vmax_global, vmax_global, 256)', ...
+            linspace(-vmax_global, vmax_global, 256)');
+        colormap(cb_ax, redblue(256));
+        set(cb_ax, 'XTick', [], 'YAxisLocation', 'right', 'YDir', 'normal');
+        ylabel(cb_ax, 'v_\theta (μm/s)', 'FontSize', 11);
+        title(cb_ax, 'CCW', 'FontSize', 9, 'Color', [0.8 0 0]);
+
+        % Add CW label at bottom
+        text(1.5, -vmax_global*0.9, 'CW', 'FontSize', 9, 'Color', [0 0 0.8], ...
+            'HorizontalAlignment', 'center', 'Parent', cb_ax);
+
+        % Add info text
+        annotation('textbox', [0.02 0.02 0.3 0.06], 'String', ...
+            sprintf('Band: %d-%d px | Max |v_\\theta|: %.2f μm/s', ...
+            bandOuterPx, bandInnerPx, max(abs(vtheta), [], 'omitnan')), ...
+            'EdgeColor', 'none', 'FontSize', 9, 'BackgroundColor', [1 1 1 0.7]);
+
+        exportgraphics(figQ, fullfile(outDir_quiver, sprintf('flow_overlay_fr%04d.png', fr)), ...
+            'Resolution', 250);
         close(figQ);
     end
 
-    fprintf('  - Saved %d quiver overlays to %s\n', numel(1:quiverEveryNFrames:nFrames), outDir_quiver);
+    fprintf('  - Saved %d enhanced flow overlays to %s\n', ...
+        numel(1:quiverEveryNFrames:nFrames), outDir_quiver);
 end
 
 % --- 5) SNAPSHOT DETAILED VISUALIZATIONS (Tangential Flow Analysis) ---
