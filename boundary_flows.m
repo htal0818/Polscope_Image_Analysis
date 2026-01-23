@@ -289,6 +289,34 @@ for fr = 1:nFrames
     Vtheta_kymo(fr,:) = vBins;
     Npts_kymo(fr,:)   = nBinsCount;
 
+    %% ----- DIAGNOSTIC: Test 1 & 3 from analysis -----
+    % Test 1: Are there enough points in the cortical band?
+    totalPtsInBand = sum(nBinsCount);
+    binsWithData = sum(nBinsCount > 0);
+
+    % Test 3: Is vtheta dynamic or nearly constant?
+    vtheta_valid = vBins(~isnan(vBins));
+    if ~isempty(vtheta_valid)
+        vtheta_range = max(vtheta_valid) - min(vtheta_valid);
+        vtheta_std = std(vtheta_valid);
+    else
+        vtheta_range = 0;
+        vtheta_std = 0;
+    end
+
+    % Log warnings for potential issues
+    if totalPtsInBand < 50
+        fprintf('  ⚠ Frame %d: LOW PIV COVERAGE - only %d points in cortical band\n', fr, totalPtsInBand);
+    end
+    if binsWithData < nThetaBins * 0.5
+        fprintf('  ⚠ Frame %d: SPARSE BINS - only %d/%d bins have data (%.0f%%)\n', ...
+            fr, binsWithData, nThetaBins, 100*binsWithData/nThetaBins);
+    end
+    if vtheta_std < 0.01 && ~isempty(vtheta_valid)
+        fprintf('  ⚠ Frame %d: FLAT VTHETA - std=%.4f μm/s, range=%.4f μm/s (may appear uniform)\n', ...
+            fr, vtheta_std, vtheta_range);
+    end
+
     %% ----- Store visualization data -----
     visPolySeq{fr} = poly;
     visImageSeq{fr} = I;
@@ -307,6 +335,58 @@ for fr = 1:nFrames
         fprintf('Processed frame %d/%d (%s)\n', fr, nFrames, cacheReasonStr);
     end
 end
+
+%% ========================== DATA QUALITY DIAGNOSTICS =========================
+fprintf('\n=== DATA QUALITY DIAGNOSTICS (Tests 1 & 3) ===\n');
+
+% Test 1: Cortical band coverage
+totalPtsPerFrame = sum(Npts_kymo, 2);
+avgPtsPerFrame = mean(totalPtsPerFrame(qcFlag), 'omitnan');
+minPtsPerFrame = min(totalPtsPerFrame(qcFlag));
+maxPtsPerFrame = max(totalPtsPerFrame(qcFlag));
+
+fprintf('Test 1 - Cortical Band Coverage:\n');
+fprintf('  PIV points per frame: avg=%.0f, min=%d, max=%d\n', avgPtsPerFrame, minPtsPerFrame, maxPtsPerFrame);
+if avgPtsPerFrame < 100
+    fprintf('  ⚠ WARNING: Low average coverage. Consider:\n');
+    fprintf('    - Increasing bandInnerPx (currently %d px)\n', bandInnerPx);
+    fprintf('    - Checking PIV grid resolution vs band width\n');
+    fprintf('    - Verifying PIV/image coordinate alignment\n');
+end
+
+% Bins with data
+binsWithDataPerFrame = sum(Npts_kymo > 0, 2);
+avgBinsWithData = mean(binsWithDataPerFrame(qcFlag), 'omitnan');
+fprintf('  Angular bins with data: avg=%.0f/%d (%.0f%%)\n', ...
+    avgBinsWithData, nThetaBins, 100*avgBinsWithData/nThetaBins);
+
+% Test 3: Vtheta dynamic range
+vtheta_all_valid = Vtheta_kymo(qcFlag, :);
+vtheta_all_valid = vtheta_all_valid(~isnan(vtheta_all_valid));
+if ~isempty(vtheta_all_valid)
+    globalRange = max(vtheta_all_valid) - min(vtheta_all_valid);
+    globalStd = std(vtheta_all_valid);
+    globalMean = mean(vtheta_all_valid);
+
+    fprintf('\nTest 3 - Vtheta Dynamic Range:\n');
+    fprintf('  Global: mean=%.4f, std=%.4f, range=%.4f μm/s\n', globalMean, globalStd, globalRange);
+
+    % Per-frame std
+    perFrameStd = std(Vtheta_kymo, 0, 2, 'omitnan');
+    avgPerFrameStd = mean(perFrameStd(qcFlag), 'omitnan');
+    fprintf('  Per-frame std: avg=%.4f μm/s\n', avgPerFrameStd);
+
+    if avgPerFrameStd < 0.01
+        fprintf('  ⚠ WARNING: Very low per-frame variation. Possible causes:\n');
+        fprintf('    - PIV vectors mostly radial (no tangential component)\n');
+        fprintf('    - Centroid detection error causing wrong tangent directions\n');
+        fprintf('    - Very slow/no cortical flow in this recording\n');
+    end
+else
+    fprintf('\nTest 3 - Vtheta Dynamic Range:\n');
+    fprintf('  ⚠ WARNING: No valid vtheta data!\n');
+end
+fprintf('==============================================\n\n');
 
 %% ========================== CACHE DIAGNOSTICS ================================
 if useMaskCaching
