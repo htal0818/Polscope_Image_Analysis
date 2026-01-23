@@ -499,19 +499,24 @@ if makeSnapshotPlots
 
         % Panel 2: Tangential velocity profile
         subplot(2,3,2);
-        plot(1:nThetaBins, vtheta, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 8);
-        xlabel('Angular Bin Number'); ylabel('v_\theta (μm/s)');
+        plot(thetaCenters, vtheta, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 8);
+        xlabel('\theta (rad)'); ylabel('v_\theta (\mum/s)');
         title('Tangential Velocity Profile');
         grid on;
-        xlim([1 nThetaBins]);
+        xlim([0 2*pi]);
+        xticks([0 pi/2 pi 3*pi/2 2*pi]);
+        xticklabels({'0', '\pi/2', '\pi', '3\pi/2', '2\pi'});
 
         % Panel 3: Curvature profile
         subplot(2,3,3);
-        plot(1:nThetaBins-1, radius_curv, 'r.-', 'LineWidth', 1.5, 'MarkerSize', 8);
-        xlabel('Angular Bin Number'); ylabel('Radius of Curvature (px)');
+        thetaCurv = linspace(0, 2*pi, numel(radius_curv));  % theta for curvature data
+        plot(thetaCurv, radius_curv, 'r.-', 'LineWidth', 1.5, 'MarkerSize', 8);
+        xlabel('\theta (rad)'); ylabel('Radius of Curvature (px)');
         title('Boundary Curvature');
         grid on;
-        xlim([1 nThetaBins-1]);
+        xlim([0 2*pi]);
+        xticks([0 pi/2 pi 3*pi/2 2*pi]);
+        xticklabels({'0', '\pi/2', '\pi', '3\pi/2', '2\pi'});
 
         % Panel 4: Polar plot of tangential velocity
         subplot(2,3,4);
@@ -526,7 +531,7 @@ if makeSnapshotPlots
         polarplot(thetaCenters(pos_idx), vtheta(pos_idx), 'r.', 'MarkerSize', 8); hold on;
         polarplot(thetaCenters(neg_idx), abs(vtheta(neg_idx)), 'b.', 'MarkerSize', 8);
         title('v_\theta Directionality');
-        legend({'CCW (+)', 'CW (-)'}, 'Location', 'northeast');  % Top right corner
+        legend({'CW (+)', 'CCW (-)'}, 'Location', 'northeast');  % Visual direction on screen
 
         % Panel 6: Statistics
         subplot(2,3,6); axis off;
