@@ -328,9 +328,9 @@ fprintf('Generating visualizations...\n');
 
 % --- 1) BASIC SIGNED KYMOGRAPH (original) ---
 fig1 = figure('Position', [100 100 1000 600]);
-imagesc(1:nThetaBins, time_min, Vtheta_kymo);
+imagesc(rad2deg(thetaCenters), time_min, Vtheta_kymo);
 axis tight;
-xlabel('Angular Bin Number', 'FontSize', 12);
+xlabel('Angle (degrees)', 'FontSize', 12);
 ylabel('Time (min)', 'FontSize', 12);
 title('Tangential Cortical Flow v_\theta(\theta,t) - Signed (μm/s)', 'FontSize', 14);
 colormap(gca, 'parula');
@@ -342,9 +342,9 @@ exportgraphics(fig1, fullfile(outDir_kymographs,'kymograph_vtheta_signed.png'), 
 if makeEnhancedKymographs
     % --- 2) MAGNITUDE KYMOGRAPH (absolute values) ---
     fig2 = figure('Position', [100 100 1000 600]);
-    imagesc(1:nThetaBins, time_min, abs(Vtheta_kymo));
+    imagesc(rad2deg(thetaCenters), time_min, abs(Vtheta_kymo));
     axis tight;
-    xlabel('Angular Bin Number', 'FontSize', 12);
+    xlabel('Angle (degrees)', 'FontSize', 12);
     ylabel('Time (min)', 'FontSize', 12);
     title('Tangential Flow Magnitude |v_\theta(\theta,t)| (μm/s)', 'FontSize', 14);
     colormap(gca, 'hot');
@@ -355,9 +355,9 @@ if makeEnhancedKymographs
 
     % --- 3) DIRECTIONAL KYMOGRAPH (diverging colormap) ---
     fig3 = figure('Position', [100 100 1000 600]);
-    imagesc(1:nThetaBins, time_min, Vtheta_kymo);
+    imagesc(rad2deg(thetaCenters), time_min, Vtheta_kymo);
     axis tight;
-    xlabel('Angular Bin Number', 'FontSize', 12);
+    xlabel('Angle (degrees)', 'FontSize', 12);
     ylabel('Time (min)', 'FontSize', 12);
     title('Tangential Flow Directionality (μm/s)', 'FontSize', 14);
 
@@ -382,12 +382,6 @@ end
 if makeQuiverOverlays
     fprintf('  - Generating quiver overlays...\n');
 
-    % Auto-select frames if not specified
-    if isempty(snapshotFrames)
-        % Select ~5 frames evenly spaced
-        snapshotFrames = round(linspace(1, nFrames, min(5, nFrames)));
-    end
-
     for fr = 1:quiverEveryNFrames:nFrames
         if ~qcFlag(fr), continue; end
 
@@ -400,14 +394,24 @@ if makeQuiverOverlays
         yc = centroidXY(fr, 2);
         vtheta = Vtheta_kymo(fr, :);
 
-        % Create figure
+        % Create figure with grayscale image
         figQ = figure('Visible', 'off', 'Position', [100 100 800 800]);
-        imshow(I, []); hold on; axis on;
+        imagesc(I); colormap(gray); axis image; hold on;
+        set(gca, 'YDir', 'reverse');  % Match image coordinates
 
-        % Plot boundary
-        plot(poly(:,1), poly(:,2), 'y-', 'LineWidth', 2);
+        % Plot boundary as a thin line (not filled polygon)
+        if ~isempty(poly) && size(poly, 1) > 2
+            plot(poly(:,1), poly(:,2), 'c-', 'LineWidth', 1.5);  % Cyan boundary line
+        end
 
-        % Compute quiver positions and vectors
+        % Plot centroid marker
+        plot(xc, yc, 'w+', 'MarkerSize', 10, 'LineWidth', 2);
+
+        % =========================================================================
+        % QUIVER ARROWS: Position on actual boundary, use polar tangent formula
+        % =========================================================================
+
+        % Subsample angular positions
         thetaSubsample = 1:quiverSubsample:nThetaBins;
         nQuiver = numel(thetaSubsample);
 
@@ -415,6 +419,11 @@ if makeQuiverOverlays
         yq = zeros(nQuiver, 1);
         uq = zeros(nQuiver, 1);
         vq = zeros(nQuiver, 1);
+        vq_colors = zeros(nQuiver, 1);  % For color-coding by velocity
+
+        % Compute boundary points at each sampled angle
+        theta_poly = atan2(poly(:,2) - yc, poly(:,1) - xc);
+        theta_poly = wrapTo2Pi(theta_poly);
 
         for k = 1:nQuiver
             idx = thetaSubsample(k);
@@ -423,44 +432,70 @@ if makeQuiverOverlays
 
             if isnan(vtheta_k), continue; end
 
-            % Position on boundary (approximate using polar coordinates from center)
-            % Use mean radius for visualization
-            R_mean = mean(RADIUS_OF_CURVATURE(fr, :), 'omitnan');
-            if isnan(R_mean), R_mean = 100; end  % fallback
+            % Find nearest boundary point at this angle
+            [~, nearest_idx] = min(abs(wrapTo2Pi(theta_poly) - wrapTo2Pi(theta_k)));
+            xq(k) = poly(nearest_idx, 1);
+            yq(k) = poly(nearest_idx, 2);
 
-            xq(k) = xc + R_mean * cos(theta_k);
-            yq(k) = yc + R_mean * sin(theta_k);
+            % Tangent vector using polar formulation: t̂ = (-sin θ, cos θ)
+            tx = -sin(theta_k);
+            ty = cos(theta_k);
 
-            % Tangent vector (perpendicular to radial direction)
-            % For counterclockwise tangent: rotate radial vector by 90 degrees
-            tx = -sin(theta_k);  % tangent x component
-            ty = cos(theta_k);   % tangent y component
+            % Scale by velocity magnitude (convert to pixels for visualization)
+            % Arrow length proportional to tangential velocity
+            arrow_scale = quiverScale * abs(vtheta_k) * px_per_um * dt_sec;  % pixels
+            arrow_scale = min(arrow_scale, 50);  % Cap arrow length for visibility
 
-            % Scale by velocity (convert to pixels for visualization)
-            % vtheta_k is in μm/s, convert to pixels for arrow length
-            arrow_scale = quiverScale * vtheta_k / px_per_um;  % pixels
-
-            uq(k) = arrow_scale * tx;
-            vq(k) = arrow_scale * ty;
+            % Direction determined by sign of vtheta_k
+            uq(k) = sign(vtheta_k) * arrow_scale * tx;
+            vq(k) = sign(vtheta_k) * arrow_scale * ty;
+            vq_colors(k) = vtheta_k;
         end
 
-        % Remove NaN entries
-        valid = ~isnan(uq) & ~isnan(vq);
+        % Remove entries where velocity was NaN
+        valid = ~isnan(vq_colors) & (uq ~= 0 | vq ~= 0);
         xq = xq(valid); yq = yq(valid);
         uq = uq(valid); vq = vq(valid);
+        vq_colors = vq_colors(valid);
 
-        % Plot quiver (no autoscale, we already scaled)
-        quiver(xq, yq, uq, vq, 0, 'Color', [0 1 0], 'LineWidth', 1.5, 'MaxHeadSize', 0.5);
+        if ~isempty(xq)
+            % Color-code arrows by velocity sign (red=CCW, blue=CW)
+            % Plot positive (CCW) and negative (CW) arrows separately
+            pos_mask = vq_colors > 0;
+            neg_mask = vq_colors < 0;
 
-        title(sprintf('Frame %d: Tangential Flow Vectors (t=%.2f min)', fr, time_min(fr)), ...
-            'FontSize', 12, 'Color', 'w');
+            % CCW flows (positive) - red arrows
+            if any(pos_mask)
+                quiver(xq(pos_mask), yq(pos_mask), uq(pos_mask), vq(pos_mask), 0, ...
+                    'Color', [1 0.2 0.2], 'LineWidth', 1.5, 'MaxHeadSize', 0.8);
+            end
 
-        % Add colorbar to show velocity scale
-        scatter([], [], [], 'Visible', 'off');  % dummy for colorbar
-        cb = colorbar;
-        colormap(gca, 'parula');
-        caxis([min(vtheta, [], 'omitnan'), max(vtheta, [], 'omitnan')]);
-        ylabel(cb, 'v_\theta (μm/s)', 'FontSize', 10, 'Color', 'w');
+            % CW flows (negative) - blue arrows
+            if any(neg_mask)
+                quiver(xq(neg_mask), yq(neg_mask), uq(neg_mask), vq(neg_mask), 0, ...
+                    'Color', [0.2 0.4 1], 'LineWidth', 1.5, 'MaxHeadSize', 0.8);
+            end
+        end
+
+        % Title and legend
+        title(sprintf('Frame %d: Tangential Flow (t=%.2f min)', fr, time_min(fr)), ...
+            'FontSize', 12, 'Color', 'k');
+
+        % Add legend for arrow colors
+        h1 = plot(NaN, NaN, '-', 'Color', [1 0.2 0.2], 'LineWidth', 2);
+        h2 = plot(NaN, NaN, '-', 'Color', [0.2 0.4 1], 'LineWidth', 2);
+        h3 = plot(NaN, NaN, 'c-', 'LineWidth', 1.5);
+        legend([h1 h2 h3], {'CCW (+)', 'CW (-)', 'Boundary'}, ...
+            'Location', 'northeast', 'FontSize', 9);
+
+        % Add velocity scale bar info in corner
+        vmax = max(abs(vtheta), [], 'omitnan');
+        if ~isnan(vmax) && vmax > 0
+            text(10, size(I,1)-20, sprintf('Max |v_\\theta| = %.2f μm/s', vmax), ...
+                'Color', 'w', 'FontSize', 9, 'BackgroundColor', [0 0 0 0.5]);
+        end
+
+        axis off;
 
         exportgraphics(figQ, fullfile(outDir_quiver, sprintf('quiver_tangential_fr%04d.png', fr)), ...
             'Resolution', 200);
@@ -498,19 +533,20 @@ if makeSnapshotPlots
 
         % Panel 2: Tangential velocity profile
         subplot(2,3,2);
-        plot(1:nThetaBins, vtheta, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 8);
-        xlabel('Angular Bin Number'); ylabel('v_\theta (μm/s)');
+        plot(rad2deg(thetaCenters), vtheta, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 8);
+        xlabel('Angle (degrees)'); ylabel('v_\theta (μm/s)');
         title('Tangential Velocity Profile');
         grid on;
-        xlim([1 nThetaBins]);
+        xlim([0 360]);
 
         % Panel 3: Curvature profile
         subplot(2,3,3);
-        plot(1:nThetaBins-1, radius_curv, 'r.-', 'LineWidth', 1.5, 'MarkerSize', 8);
-        xlabel('Angular Bin Number'); ylabel('Radius of Curvature (px)');
+        curvature_angles = rad2deg(thetaCenters(1:end-1));
+        plot(curvature_angles, radius_curv, 'r.-', 'LineWidth', 1.5, 'MarkerSize', 8);
+        xlabel('Angle (degrees)'); ylabel('Radius of Curvature (px)');
         title('Boundary Curvature');
         grid on;
-        xlim([1 nThetaBins-1]);
+        xlim([0 360]);
 
         % Panel 4: Polar plot of tangential velocity
         subplot(2,3,4);
@@ -769,8 +805,9 @@ function [vBins, nCount, dbg] = tangential_from_boundary_curvature( ...
     X, Y, U, V, BW, poly, centroid, bandOuterPx, bandInnerPx, nThetaBins, thetaBinEdges, ...
     px_per_um, dt_sec, pivVelUnit, nDenseSpline)
 % Calculate tangential velocity field using curvature-based boundary.
-% STRICT PHYSICAL ENCODING:
-% - Tangent vectors computed from smooth polynomial boundary
+% STRICT PHYSICAL ENCODING (SCW analysis standard):
+% - Polar coordinate tangent formulation: t̂ = (-sin θ, cos θ)
+% - Reference: Bement et al. 2015, Maître et al. 2012
 % - Velocities converted to physical units (um/s)
 % - Tangential component: v_tangent = v · t̂ (dot product with unit tangent)
 % - Binned by angular position theta around oocyte centroid
@@ -782,7 +819,7 @@ function [vBins, nCount, dbg] = tangential_from_boundary_curvature( ...
 if isempty(poly)
     vBins = nan(1,nThetaBins);
     nCount = zeros(1,nThetaBins);
-    dbg = struct('xDense',[],'yDense',[],'sampleX',[],'sampleY',[]);
+    dbg = struct('xDense',[],'yDense',[],'sampleX',[],'sampleY',[],'tx',[],'ty',[]);
     return;
 end
 
@@ -803,36 +840,50 @@ L  = s(end);
 if L < 50
     vBins = nan(1,nThetaBins);
     nCount = zeros(1,nThetaBins);
-    dbg = struct('xDense',xb,'yDense',yb,'sampleX',[],'sampleY',[]);
+    dbg = struct('xDense',xb,'yDense',yb,'sampleX',[],'sampleY',[],'tx',[],'ty',[]);
     return;
 end
 
-% Simple finite difference tangent calculation (centered differences)
-% Faster and doesn't require Curve Fitting Toolbox
-% Densely sample boundary using linear interpolation
-tSample = linspace(0, 1, nDenseSpline);
-xDense = interp1(linspace(0,1,numel(xb)), xb, tSample, 'linear');
-yDense = interp1(linspace(0,1,numel(yb)), yb, tSample, 'linear');
+% Get centroid coordinates
+cx = centroid(1); cy = centroid(2);
 
-nPts = numel(xDense);
-tx = zeros(nPts, 1);
-ty = zeros(nPts, 1);
+% =========================================================================
+% POLAR COORDINATE TANGENT CALCULATION (SCW analysis standard)
+% Reference: Bement et al. 2015, Maître et al. 2012
+% In polar coordinates centered at (cx, cy):
+%   Radial unit vector: r̂ = (cos θ, sin θ)
+%   Tangent unit vector: t̂ = (-sin θ, cos θ)  [perpendicular to radial, CCW]
+% =========================================================================
 
-% Centered finite difference with periodic boundary conditions
-for i = 1:nPts
-    i_prev = mod(i-2, nPts) + 1;  % wrap around for i=1
-    i_next = mod(i, nPts) + 1;     % wrap around for i=nPts
+% Dense angular sampling for boundary representation
+thetaDense = linspace(0, 2*pi, nDenseSpline);
 
-    % Tangent = (next_point - prev_point) / 2
-    % This approximates dr/ds using centered difference
-    tx(i) = (xDense(i_next) - xDense(i_prev)) / 2;
-    ty(i) = (yDense(i_next) - yDense(i_prev)) / 2;
-end
+% Interpolate boundary polygon to dense angular sampling
+% First compute angles for original boundary points
+theta_poly = atan2(yb - cy, xb - cx);
+theta_poly = wrapTo2Pi(theta_poly);
 
-% Normalize tangent to unit vector (strict physical encoding: t̂)
-tN = hypot(tx,ty) + eps;
-tx = tx./tN;
-ty = ty./tN;
+% Sort by angle for proper interpolation
+[theta_sorted, sort_idx] = sort(theta_poly);
+xb_sorted = xb(sort_idx);
+yb_sorted = yb(sort_idx);
+
+% Handle wrap-around by extending data
+theta_extended = [theta_sorted - 2*pi; theta_sorted; theta_sorted + 2*pi];
+xb_extended = [xb_sorted; xb_sorted; xb_sorted];
+yb_extended = [yb_sorted; yb_sorted; yb_sorted];
+
+% Interpolate to dense angular grid
+xDense = interp1(theta_extended, xb_extended, thetaDense, 'linear');
+yDense = interp1(theta_extended, yb_extended, thetaDense, 'linear');
+
+% Tangent vectors directly from polar geometry (unit tangent perpendicular to radial)
+tx = -sin(thetaDense);  % x-component of unit tangent
+ty = cos(thetaDense);   % y-component of unit tangent
+
+% =========================================================================
+% END POLAR TANGENT CALCULATION
+% =========================================================================
 
 % Define cortical band using distance-to-perimeter inside BW
 % This ensures we only sample velocities within the cortical region
@@ -850,28 +901,34 @@ inBand = inside & (D(lin) >= bandOuterPx) & (D(lin) <= bandInnerPx);
 if ~any(inBand(:))
     vBins = nan(1,nThetaBins);
     nCount = zeros(1,nThetaBins);
-    dbg = struct('xDense',xDense,'yDense',yDense,'sampleX',[],'sampleY',[]);
+    dbg = struct('xDense',xDense,'yDense',yDense,'sampleX',[],'sampleY',[],'tx',tx,'ty',ty);
     return;
 end
 
 xq = X(inBand); yq = Y(inBand);
 uq = U_um_s(inBand); vq = V_um_s(inBand);
 
-% Nearest point on dense boundary samples (brute-force; PIV grids are small)
-idxNearest = nearest_dense_points(xq, yq, xDense, yDense);
+% =========================================================================
+% PIV MAPPING: Assign angles to PIV points, use tangent at that angle
+% Each PIV vector uses the tangent direction at its own angular position
+% (not the nearest boundary point's tangent)
+% =========================================================================
 
-tqx = tx(idxNearest);
-tqy = ty(idxNearest);
+% Compute angle of each PIV point relative to centroid
+theta_piv = atan2(yq - cy, xq - cx);
+theta_piv = wrapTo2Pi(theta_piv);
+
+% Use polar tangent at each PIV point's angle
+% t̂ = (-sin θ, cos θ) for CCW direction
+tqx = -sin(theta_piv);
+tqy = cos(theta_piv);
 
 % STRICT PHYSICAL ENCODING: tangential component = v · t̂
 % where v = (u, v) is velocity vector, t̂ = (tx, ty) is unit tangent
 vT = uq.*tqx + vq.*tqy;  % tangential velocity [um/s]
 
-% Theta coordinate assigned from nearest boundary point relative to centroid
-% This maintains angular position consistency with curvature calculation
-cx = centroid(1); cy = centroid(2);
-th = atan2(yDense(idxNearest) - cy, xDense(idxNearest) - cx);
-th = wrapTo2Pi(th);
+% Use PIV point angles for binning (consistent with tangent calculation)
+th = theta_piv;
 
 % Bin into theta bins (angular averaging)
 vBins = nan(1,nThetaBins);
@@ -886,6 +943,10 @@ end
 dbg = struct();
 dbg.xDense = xDense; dbg.yDense = yDense;
 dbg.sampleX = xq; dbg.sampleY = yq;
+dbg.tx = tx; dbg.ty = ty;
+dbg.theta_piv = theta_piv;
+dbg.tqx = tqx; dbg.tqy = tqy;
+dbg.vT = vT;
 
 end
 
