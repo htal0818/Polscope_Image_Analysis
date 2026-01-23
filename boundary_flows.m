@@ -329,38 +329,43 @@ fprintf('Generating visualizations...\n');
 
 % --- 1) BASIC SIGNED KYMOGRAPH (original) ---
 fig1 = figure('Position', [100 100 1000 600]);
-imagesc(1:nThetaBins, time_min, Vtheta_kymo);
+imagesc(thetaCenters, time_min, Vtheta_kymo);
 axis tight;
-xlabel('Angular Bin Number', 'FontSize', 12);
+xlabel('\theta (rad)', 'FontSize', 12);
 ylabel('Time (min)', 'FontSize', 12);
-title('Tangential Cortical Flow v_\theta(\theta,t) - Signed (μm/s)', 'FontSize', 14);
+title('Tangential Cortical Flow v_\theta(\theta,t) - Signed (\mum/s)', 'FontSize', 14);
 colormap(gca, 'parula');
 cb = colorbar;
-ylabel(cb, 'v_\theta (μm/s)', 'FontSize', 11);
+ylabel(cb, 'v_\theta (\mum/s)', 'FontSize', 11);
 set(gca, 'FontSize', 11);
+% Set x-axis ticks at 0, π/2, π, 3π/2, 2π
+xticks([0 pi/2 pi 3*pi/2 2*pi]);
+xticklabels({'0', '\pi/2', '\pi', '3\pi/2', '2\pi'});
 exportgraphics(fig1, fullfile(outDir_kymographs,'kymograph_vtheta_signed.png'), 'Resolution', 300);
 
 if makeEnhancedKymographs
     % --- 2) MAGNITUDE KYMOGRAPH (absolute values) ---
     fig2 = figure('Position', [100 100 1000 600]);
-    imagesc(1:nThetaBins, time_min, abs(Vtheta_kymo));
+    imagesc(thetaCenters, time_min, abs(Vtheta_kymo));
     axis tight;
-    xlabel('Angular Bin Number', 'FontSize', 12);
+    xlabel('\theta (rad)', 'FontSize', 12);
     ylabel('Time (min)', 'FontSize', 12);
-    title('Tangential Flow Magnitude |v_\theta(\theta,t)| (μm/s)', 'FontSize', 14);
+    title('Tangential Flow Magnitude |v_\theta(\theta,t)| (\mum/s)', 'FontSize', 14);
     colormap(gca, 'hot');
     cb = colorbar;
-    ylabel(cb, '|v_\theta| (μm/s)', 'FontSize', 11);
+    ylabel(cb, '|v_\theta| (\mum/s)', 'FontSize', 11);
     set(gca, 'FontSize', 11);
+    xticks([0 pi/2 pi 3*pi/2 2*pi]);
+    xticklabels({'0', '\pi/2', '\pi', '3\pi/2', '2\pi'});
     exportgraphics(fig2, fullfile(outDir_kymographs,'kymograph_vtheta_magnitude.png'), 'Resolution', 300);
 
     % --- 3) DIRECTIONAL KYMOGRAPH (diverging colormap) ---
     fig3 = figure('Position', [100 100 1000 600]);
-    imagesc(1:nThetaBins, time_min, Vtheta_kymo);
+    imagesc(thetaCenters, time_min, Vtheta_kymo);
     axis tight;
-    xlabel('Angular Bin Number', 'FontSize', 12);
+    xlabel('\theta (rad)', 'FontSize', 12);
     ylabel('Time (min)', 'FontSize', 12);
-    title('Tangential Flow Directionality (μm/s)', 'FontSize', 14);
+    title('Tangential Flow Directionality (\mum/s)', 'FontSize', 14);
 
     % Diverging colormap: blue (negative/clockwise) to red (positive/counterclockwise)
     colormap(gca, redblue(256));
@@ -372,8 +377,10 @@ if makeEnhancedKymographs
     end
 
     cb = colorbar;
-    ylabel(cb, 'v_\theta (μm/s): red=CCW, blue=CW', 'FontSize', 10);
+    ylabel(cb, 'v_\theta (\mum/s): red=CW, blue=CCW', 'FontSize', 10);
     set(gca, 'FontSize', 11);
+    xticks([0 pi/2 pi 3*pi/2 2*pi]);
+    xticklabels({'0', '\pi/2', '\pi', '3\pi/2', '2\pi'});
     exportgraphics(fig3, fullfile(outDir_kymographs,'kymograph_vtheta_directional.png'), 'Resolution', 300);
 
     fprintf('  - Saved 3 kymograph variants\n');
@@ -488,9 +495,9 @@ if makeQuiverOverlays
         colormap(gca, cmap_diverge);
         caxis(clim_quiver);
 
-        % Add colorbar
+        % Add colorbar (labels use VISUAL direction on screen)
         cb = colorbar;
-        ylabel(cb, 'v_\theta (\mum/s): red=CCW, blue=CW', 'FontSize', 10, 'Color', 'w');
+        ylabel(cb, 'v_\theta (\mum/s): red=CW, blue=CCW', 'FontSize', 10, 'Color', 'w');
         set(cb, 'Color', 'w');  % white tick labels
 
         title(sprintf('Frame %d: Tangential Flow (t=%.2f min)', fr, time_min(fr)), ...
