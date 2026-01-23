@@ -46,8 +46,9 @@ doCrop = true;
 cropRect = [500 500 2000 2000];  % [x y w h] in pixels (like your script)
 
 % --- Units / timing ---
-px_per_um = 6.25 /2;     % px/um
-dt_sec    = 15;       % sec/frame
+px_per_um = 3.125;       % px/μm (adjust for your microscope objective)
+                         % Common values: 20x objective ~ 3.125 px/μm
+dt_sec    = 15;          % sec/frame
 
 % --- PIV velocity units ---
 pivVelUnit = 'px_per_frame';  % 'px_per_frame' or 'px_per_sec'
@@ -69,6 +70,32 @@ nThetaBins = 101;                 % like your theta=linspace(0,2*pi,101)
 thetaEdges = linspace(0,2*pi,nThetaBins);  % bin centers style
 thetaCenters = thetaEdges;        % treat as centers for output
 thetaBinEdges = linspace(0,2*pi,nThetaBins+1);
+
+% --- AV (Animal-Vegetal) Axis Configuration ---
+% The AV axis defines the biological reference frame for directionality.
+% CW/CCW rotation is defined relative to this axis:
+%   - θ=0 points along the AV axis (from centroid toward animal pole)
+%   - CCW (positive v_θ) = flow rotating counterclockwise when viewed with
+%     animal pole at top
+%   - CW (negative v_θ) = flow rotating clockwise when viewed with animal
+%     pole at top
+%
+% Three modes are supported:
+%   1) 'manual_angle'  - Specify the AV axis angle directly in radians
+%   2) 'manual_points' - Specify two points: [animal_x, animal_y] and [vegetal_x, vegetal_y]
+%   3) 'auto_intensity' - Auto-detect from first-moment asymmetry (intensity centroid offset)
+%
+% RECOMMENDED: Use 'auto_intensity' for automated detection
+avAxisMode = 'auto_intensity';    % 'manual_angle', 'manual_points', or 'auto_intensity'
+
+% For 'manual_angle' mode: angle in radians from positive x-axis to animal pole
+% (0 = animal pole at 3 o'clock, pi/2 = animal pole at 12 o'clock, etc.)
+avAxisAngle_manual = 0;
+
+% For 'manual_points' mode: specify animal and vegetal pole pixel coordinates
+% These should be approximate locations on the oocyte boundary
+avAnimalPole_xy = [1000, 500];   % [x, y] of animal pole (adjust to your data)
+avVegetalPole_xy = [1000, 1500]; % [x, y] of vegetal pole (adjust to your data)
 
 % --- Boundary smoothing / spline sampling ---
 nDenseSpline = 5000;   % dense samples along boundary for smooth nearest-point lookup (increased density)
@@ -149,6 +176,160 @@ cacheRecalcCount = 0;        % Diagnostic: number of full recalculations
 % --- Visualization data storage ---
 visPolySeq = cell(nFrames,1);     % Store polygon for each frame (for quiver plots)
 visImageSeq = cell(nFrames,1);    % Store normalized images (for overlays)
+
+%% ========================== DETECT AV AXIS ================================
+% Detect the AV axis from the first frame to establish a consistent reference
+% frame for all subsequent angular measurements.
+fprintf('Detecting AV axis from first frame...\n');
+
+% Load first frame image for AV axis detection
+a1_init = double(imread(fullfile(d1(1).folder, d1(1).name)));
+if useFourStates
+    a2_init = double(imread(fullfile(d2(1).folder, d2(1).name)));
+    a3_init = double(imread(fullfile(d3(1).folder, d3(1).name)));
+    a4_init = double(imread(fullfile(d4(1).folder, d4(1).name)));
+    I_init = a1_init + a2_init + a3_init + a4_init;
+else
+    I_init = a1_init;
+end
+if doCrop
+    I_init = imcrop(I_init, cropRect);
+end
+I_init = mat2gray(I_init);
+
+% Get mask for first frame
+[BW_init, stats_init, ~, ~, xc_init, yc_init] = make_oocyte_mask_curvature(I_init, ...
+    sigmaBlur, threshFrac, se, polyOrder, nBoundary, thetaCenters, ...
+    minAreaFrac, maxEccentric, minSolidity, []);
+
+if isempty(stats_init)
+    warning('First frame mask failed - using default AV axis (θ=0 = positive x-axis)');
+    avAxisAngle = 0;
+else
+    % Detect AV axis using the configured method
+    avAxisAngle = detectAVAxis(I_init, BW_init, [xc_init, yc_init], ...
+        avAxisMode, avAxisAngle_manual, avAnimalPole_xy, avVegetalPole_xy);
+end
+
+fprintf('\n=== AV AXIS REFERENCE FRAME ===\n');
+fprintf('AV axis angle: %.2f rad (%.1f deg from positive x-axis)\n', avAxisAngle, rad2deg(avAxisAngle));
+fprintf('θ=0 now points toward the ANIMAL POLE\n');
+fprintf('CCW (red, +): flow rotating counterclockwise (animal pole at top)\n');
+fprintf('CW (blue, -): flow rotating clockwise (animal pole at top)\n');
+fprintf('================================\n\n');
+
+% --- DIAGNOSTIC FIGURE: AV AXIS DETECTION ---
+% Save a diagnostic image showing the detected AV axis overlaid on the first frame
+fprintf('Saving AV axis diagnostic figure...\n');
+
+figAV = figure('Position', [100 100 900 900], 'Visible', 'off');
+
+% Reload first frame for visualization
+a1_diag = double(imread(fullfile(d1(1).folder, d1(1).name)));
+if useFourStates
+    a2_diag = double(imread(fullfile(d2(1).folder, d2(1).name)));
+    a3_diag = double(imread(fullfile(d3(1).folder, d3(1).name)));
+    a4_diag = double(imread(fullfile(d4(1).folder, d4(1).name)));
+    I_diag = a1_diag + a2_diag + a3_diag + a4_diag;
+else
+    I_diag = a1_diag;
+end
+if doCrop
+    I_diag = imcrop(I_diag, cropRect);
+end
+I_diag = mat2gray(I_diag);
+
+imshow(I_diag, []); hold on;
+
+% Get boundary for first frame
+[BW_diag, ~, poly_diag, RADIUS_diag, xc_diag, yc_diag] = make_oocyte_mask_curvature(I_diag, ...
+    sigmaBlur, threshFrac, se, polyOrder, nBoundary, thetaCenters, ...
+    minAreaFrac, maxEccentric, minSolidity, []);
+
+if ~isempty(poly_diag)
+    % Plot oocyte boundary
+    plot(poly_diag(:,1), poly_diag(:,2), 'y-', 'LineWidth', 2);
+
+    % Plot centroid
+    plot(xc_diag, yc_diag, 'r+', 'MarkerSize', 20, 'LineWidth', 3);
+
+    % Find where AV axis intersects the boundary
+    [ani_boundary, veg_boundary, avAxisLength_px] = findAVAxisBoundaryIntersections( ...
+        poly_diag, [xc_diag, yc_diag], avAxisAngle);
+
+    avAxisLength_um = avAxisLength_px / px_per_um;
+
+    % Plot AV axis line from boundary to boundary
+    plot([veg_boundary(1) ani_boundary(1)], [veg_boundary(2) ani_boundary(2)], 'g-', 'LineWidth', 3);
+
+    % Mark poles at actual boundary intersections
+    plot(ani_boundary(1), ani_boundary(2), 'go', 'MarkerSize', 15, 'MarkerFaceColor', 'g', 'LineWidth', 2);
+    text(ani_boundary(1) + 20, ani_boundary(2), sprintf('A (Animal)\n%.1f μm from center', ...
+        hypot(ani_boundary(1)-xc_diag, ani_boundary(2)-yc_diag)/px_per_um), ...
+        'Color', 'g', 'FontSize', 12, 'FontWeight', 'bold');
+
+    plot(veg_boundary(1), veg_boundary(2), 'mo', 'MarkerSize', 15, 'MarkerFaceColor', 'm', 'LineWidth', 2);
+    text(veg_boundary(1) + 20, veg_boundary(2), sprintf('V (Vegetal)\n%.1f μm from center', ...
+        hypot(veg_boundary(1)-xc_diag, veg_boundary(2)-yc_diag)/px_per_um), ...
+        'Color', 'm', 'FontSize', 12, 'FontWeight', 'bold');
+
+    fprintf('AV axis length: %.1f μm (%.1f px)\n', avAxisLength_um, avAxisLength_px);
+
+    % Store these for use in spatial kymograph
+    avAxisLength_um_global = avAxisLength_um;
+    ani_boundary_global = ani_boundary;
+    veg_boundary_global = veg_boundary;
+
+    % If auto-detection was used, also show the intensity centroid offset
+    if strcmpi(avAxisMode, 'auto_intensity')
+        [H_diag, W_diag] = size(I_diag);
+        [Xgrid_diag, Ygrid_diag] = meshgrid(1:W_diag, 1:H_diag);
+        Imask_diag = double(I_diag);
+        Imask_diag(~BW_diag) = NaN;
+        totalInt_diag = sum(Imask_diag(:), 'omitnan');
+        if totalInt_diag > 0
+            intCx = sum(Xgrid_diag(:) .* Imask_diag(:), 'omitnan') / totalInt_diag;
+            intCy = sum(Ygrid_diag(:) .* Imask_diag(:), 'omitnan') / totalInt_diag;
+
+            % Plot intensity centroid
+            plot(intCx, intCy, 'c*', 'MarkerSize', 15, 'LineWidth', 2);
+
+            % Draw offset arrow from geometric to intensity centroid
+            quiver(xc_diag, yc_diag, intCx - xc_diag, intCy - yc_diag, 0, ...
+                'Color', 'c', 'LineWidth', 2, 'MaxHeadSize', 2);
+
+            text(intCx + 15, intCy + 15, 'Intensity Centroid', 'Color', 'c', 'FontSize', 10);
+        end
+    end
+end
+
+% Add scale bar (using px_per_um conversion)
+scalebar_um = 50;  % 50 μm scale bar
+scalebar_px = scalebar_um * px_per_um;
+sb_x = 50;
+sb_y = size(I_diag, 1) - 50;
+plot([sb_x, sb_x + scalebar_px], [sb_y, sb_y], 'w-', 'LineWidth', 4);
+text(sb_x + scalebar_px/2, sb_y - 20, sprintf('%d μm', scalebar_um), ...
+    'Color', 'w', 'FontSize', 12, 'HorizontalAlignment', 'center');
+
+if exist('avAxisLength_um', 'var')
+    title({sprintf('AV Axis Detection (mode: %s)', avAxisMode), ...
+           sprintf('Angle: %.1f° | AV axis length: %.1f μm', rad2deg(avAxisAngle), avAxisLength_um), ...
+           sprintf('Centroid: (%.1f, %.1f) px', xc_diag, yc_diag)}, ...
+          'FontSize', 14, 'Color', 'w');
+else
+    title({sprintf('AV Axis Detection (mode: %s)', avAxisMode), ...
+           sprintf('Angle: %.1f° from +x axis | Centroid: (%.1f, %.1f)', ...
+                   rad2deg(avAxisAngle), xc_diag, yc_diag)}, ...
+          'FontSize', 14, 'Color', 'w');
+end
+
+exportgraphics(figAV, fullfile(outDir_qc, 'AV_axis_diagnostic.png'), 'Resolution', 300);
+close(figAV);
+fprintf('  - Saved AV axis diagnostic to %s\n\n', fullfile(outDir_qc, 'AV_axis_diagnostic.png'));
+
+clear a1_diag a2_diag a3_diag a4_diag I_diag BW_diag poly_diag RADIUS_diag xc_diag yc_diag;
+clear a1_init a2_init a3_init a4_init I_init BW_init stats_init xc_init yc_init;
 
 %% ========================== MAIN LOOP =====================================
 for fr = 1:nFrames
@@ -281,10 +462,11 @@ for fr = 1:nFrames
     end
 
     %% ----- Compute tangential v_theta(theta) using curvature-based boundary -----
+    % Note: avAxisAngle rotates the angular coordinate system so θ=0 aligns with AV axis
     [vBins, nBinsCount, dbgFlow] = tangential_from_boundary_curvature( ...
         X, Y, U, V, BW, poly, [xc, yc], ...
         bandOuterPx, bandInnerPx, nThetaBins, thetaBinEdges, ...
-        px_per_um, dt_sec, pivVelUnit, nDenseSpline);
+        px_per_um, dt_sec, pivVelUnit, nDenseSpline, avAxisAngle);
 
     Vtheta_kymo(fr,:) = vBins;
     Npts_kymo(fr,:)   = nBinsCount;
@@ -326,56 +508,117 @@ time_min = (0:nFrames-1) * (dt_sec/60);
 
 fprintf('Generating visualizations...\n');
 
-% --- 1) BASIC SIGNED KYMOGRAPH (original) ---
-fig1 = figure('Position', [100 100 1000 600]);
+% --- 1) DIRECTIONAL KYMOGRAPH (primary output) ---
+% This is the main kymograph showing flow direction relative to the AV axis.
+% θ=0 corresponds to the animal pole direction; θ increases CCW from there.
+fig1 = figure('Position', [100 100 1100 700]);
+
 imagesc(1:nThetaBins, time_min, Vtheta_kymo);
 axis tight;
-xlabel('Angular Bin Number', 'FontSize', 12);
+
+% X-axis: show angular position relative to AV axis
+xlabel('Angular Position θ (relative to AV axis)', 'FontSize', 12);
 ylabel('Time (min)', 'FontSize', 12);
-title('Tangential Cortical Flow v_\theta(\theta,t) - Signed (μm/s)', 'FontSize', 14);
-colormap(gca, 'parula');
+
+% Clear title explaining the reference frame
+title({'Tangential Cortical Flow v_\theta(\theta,t)', ...
+       sprintf('AV axis at %.0f° from image x-axis | θ=0 → Animal Pole', rad2deg(avAxisAngle))}, ...
+       'FontSize', 13);
+
+% Diverging colormap: blue (CW) to red (CCW)
+colormap(gca, redblue(256));
+
+% Symmetric color limits around zero
+vmax = max(abs(Vtheta_kymo(:)), [], 'omitnan');
+if ~isnan(vmax) && vmax > 0
+    clim([-vmax, vmax]);
+end
+
 cb = colorbar;
-ylabel(cb, 'v_\theta (μm/s)', 'FontSize', 11);
+ylabel(cb, {'v_\theta (μm/s)', 'RED: CCW (+) | BLUE: CW (−)'}, 'FontSize', 10);
 set(gca, 'FontSize', 11);
-exportgraphics(fig1, fullfile(outDir_kymographs,'kymograph_vtheta_signed.png'), 'Resolution', 300);
+
+% Add custom x-tick labels showing degrees from AV axis
+xtick_positions = linspace(1, nThetaBins, 5);
+xtick_labels = {'0° (A)', '90°', '180° (V)', '270°', '360° (A)'};
+set(gca, 'XTick', xtick_positions, 'XTickLabel', xtick_labels);
+
+exportgraphics(fig1, fullfile(outDir_kymographs,'kymograph_vtheta_directional.png'), 'Resolution', 300);
+fprintf('  - Saved directional kymograph (primary output)\n');
 
 if makeEnhancedKymographs
     % --- 2) MAGNITUDE KYMOGRAPH (absolute values) ---
-    fig2 = figure('Position', [100 100 1000 600]);
+    % Shows flow intensity regardless of direction - useful for identifying
+    % regions of high activity without directional bias
+    fig2 = figure('Position', [100 100 1100 700]);
     imagesc(1:nThetaBins, time_min, abs(Vtheta_kymo));
     axis tight;
-    xlabel('Angular Bin Number', 'FontSize', 12);
+    xlabel('Angular Position θ (relative to AV axis)', 'FontSize', 12);
     ylabel('Time (min)', 'FontSize', 12);
-    title('Tangential Flow Magnitude |v_\theta(\theta,t)| (μm/s)', 'FontSize', 14);
+    title({'Tangential Flow Magnitude |v_\theta(\theta,t)|', ...
+           'Flow intensity regardless of direction'}, 'FontSize', 13);
     colormap(gca, 'hot');
     cb = colorbar;
     ylabel(cb, '|v_\theta| (μm/s)', 'FontSize', 11);
     set(gca, 'FontSize', 11);
+    set(gca, 'XTick', xtick_positions, 'XTickLabel', xtick_labels);
     exportgraphics(fig2, fullfile(outDir_kymographs,'kymograph_vtheta_magnitude.png'), 'Resolution', 300);
 
-    % --- 3) DIRECTIONAL KYMOGRAPH (diverging colormap) ---
-    fig3 = figure('Position', [100 100 1000 600]);
-    imagesc(1:nThetaBins, time_min, Vtheta_kymo);
-    axis tight;
-    xlabel('Angular Bin Number', 'FontSize', 12);
-    ylabel('Time (min)', 'FontSize', 12);
-    title('Tangential Flow Directionality (μm/s)', 'FontSize', 14);
+    fprintf('  - Saved magnitude kymograph\n');
 
-    % Diverging colormap: blue (negative/clockwise) to red (positive/counterclockwise)
-    colormap(gca, redblue(256));
+    % --- 3) SPATIAL KYMOGRAPH (arc length in μm) ---
+    % Shows the same directional data but with x-axis in physical arc length units
+    % Uses the measured AV axis length for spatial context
+    fig3 = figure('Position', [100 100 1100 700]);
 
-    % Symmetric color limits around zero
-    vmax = max(abs(Vtheta_kymo(:)), [], 'omitnan');
-    if ~isnan(vmax) && vmax > 0
-        clim([-vmax, vmax]);
+    % Compute spatial scale from AV axis measurement (cell diameter along AV axis)
+    if exist('avAxisLength_um_global', 'var') && avAxisLength_um_global > 0
+        % Use measured AV axis length (more accurate)
+        cell_diameter_um = avAxisLength_um_global;
+        mean_radius_um = cell_diameter_um / 2;
+        circumference_um = pi * cell_diameter_um;  % πd
+        spatial_source = 'measured AV axis';
+    else
+        % Fallback to mean radius from curvature calculation
+        mean_radius_all_frames = nanmean(RADIUS_OF_CURVATURE(:), 'omitnan');
+        if isnan(mean_radius_all_frames)
+            mean_radius_all_frames = 100;  % fallback in pixels
+        end
+        mean_radius_um = mean_radius_all_frames / px_per_um;
+        cell_diameter_um = 2 * mean_radius_um;
+        circumference_um = 2 * pi * mean_radius_um;
+        spatial_source = 'mean radius';
     end
 
-    cb = colorbar;
-    ylabel(cb, 'v_\theta (μm/s): red=CCW, blue=CW', 'FontSize', 10);
-    set(gca, 'FontSize', 11);
-    exportgraphics(fig3, fullfile(outDir_kymographs,'kymograph_vtheta_directional.png'), 'Resolution', 300);
+    % Arc length positions for each theta bin
+    arclength_um = thetaCenters * mean_radius_um;  % s = r * θ
 
-    fprintf('  - Saved 3 kymograph variants\n');
+    imagesc(arclength_um, time_min, Vtheta_kymo);
+    axis tight;
+
+    xlabel('Arc Length from Animal Pole (μm)', 'FontSize', 12);
+    ylabel('Time (min)', 'FontSize', 12);
+
+    title({sprintf('Spatial Tangential Flow (AV axis = %.1f μm, circumference ≈ %.0f μm)', ...
+                   cell_diameter_um, circumference_um), ...
+           sprintf('Scale from %s | θ=0 → Animal Pole', spatial_source)}, ...
+           'FontSize', 13);
+
+    colormap(gca, redblue(256));
+    clim([-vmax, vmax]);
+
+    cb = colorbar;
+    ylabel(cb, {'v_\theta (μm/s)', 'RED: CCW | BLUE: CW'}, 'FontSize', 10);
+    set(gca, 'FontSize', 11);
+
+    % Add tick labels at key positions (A, 90°, V, 270°, back to A)
+    arc_ticks = [0, 0.25, 0.5, 0.75, 1.0] * circumference_um;
+    arc_labels = {'A (0°)', '90°', 'V (180°)', '270°', 'A (360°)'};
+    set(gca, 'XTick', arc_ticks, 'XTickLabel', arc_labels);
+
+    exportgraphics(fig3, fullfile(outDir_kymographs,'kymograph_vtheta_spatial.png'), 'Resolution', 300);
+
+    fprintf('  - Saved spatial kymograph (arc length in μm, %s)\n', spatial_source);
 end
 
 % --- 4) QUIVER OVERLAYS (tangential flow vectors on boundary) ---
@@ -452,8 +695,14 @@ if makeQuiverOverlays
         % Plot quiver (no autoscale, we already scaled)
         quiver(xq, yq, uq, vq, 0, 'Color', [0 1 0], 'LineWidth', 1.5, 'MaxHeadSize', 0.5);
 
-        title(sprintf('Frame %d: Tangential Flow Vectors (t=%.2f min)', fr, time_min(fr)), ...
-            'FontSize', 12, 'Color', 'w');
+        % Draw AV axis indicator
+        av_x_q = xc + R_mean * 1.3 * cos(avAxisAngle);
+        av_y_q = yc + R_mean * 1.3 * sin(avAxisAngle);
+        plot([xc av_x_q], [yc av_y_q], 'm-', 'LineWidth', 3);
+        text(av_x_q, av_y_q, ' A', 'Color', 'm', 'FontSize', 14, 'FontWeight', 'bold');
+
+        title(sprintf('Frame %d: Tangential Flow (t=%.2f min) | AV axis at %.0f°', ...
+            fr, time_min(fr), rad2deg(avAxisAngle)), 'FontSize', 12, 'Color', 'w');
 
         % Add colorbar to show velocity scale
         scatter([], [], [], 'Visible', 'off');  % dummy for colorbar
@@ -489,11 +738,20 @@ if makeSnapshotPlots
         % Create multi-panel figure
         figSnap = figure('Position', [50 50 1400 800]);
 
-        % Panel 1: Image with boundary and quiver
+        % Panel 1: Image with boundary, centroid, and AV axis indicator
         subplot(2,3,1);
         imshow(I, []); hold on;
         plot(poly(:,1), poly(:,2), 'y-', 'LineWidth', 2);
         plot(xc, yc, 'r+', 'MarkerSize', 12, 'LineWidth', 2);
+
+        % Draw AV axis line (from centroid toward animal pole)
+        R_vis = mean(RADIUS_OF_CURVATURE(fr, :), 'omitnan');
+        if isnan(R_vis), R_vis = 100; end
+        av_x = xc + R_vis * 1.2 * cos(avAxisAngle);
+        av_y = yc + R_vis * 1.2 * sin(avAxisAngle);
+        plot([xc av_x], [yc av_y], 'g-', 'LineWidth', 2);
+        text(av_x, av_y, ' A', 'Color', 'g', 'FontSize', 12, 'FontWeight', 'bold');
+
         title(sprintf('Frame %d (t=%.2f min)', fr, time_min(fr)));
 
         % Panel 2: Tangential velocity profile
@@ -517,15 +775,17 @@ if makeSnapshotPlots
         polarplot(thetaCenters, abs(vtheta), 'b-', 'LineWidth', 2);
         title('|v_\theta| Magnitude (Polar)');
 
-        % Panel 5: Signed polar plot
+        % Panel 5: Signed polar plot with AV axis reference
         subplot(2,3,5);
         % For signed polar plot, show as two colors
         pos_idx = vtheta >= 0;
         neg_idx = vtheta < 0;
         polarplot(thetaCenters(pos_idx), vtheta(pos_idx), 'r.', 'MarkerSize', 8); hold on;
         polarplot(thetaCenters(neg_idx), abs(vtheta(neg_idx)), 'b.', 'MarkerSize', 8);
-        title('v_\theta Directionality');
-        legend({'CCW (+)', 'CW (-)'}, 'Location', 'northeast');  % Top right corner
+        % Mark AV axis (θ=0)
+        polarplot([0 0], [0 max(abs(vtheta), [], 'omitnan')], 'g-', 'LineWidth', 2);
+        title({'v_\theta Directionality', '(θ=0 → Animal Pole)'});
+        legend({'CCW (+)', 'CW (-)', 'AV axis'}, 'Location', 'northeast');
 
         % Panel 6: Statistics
         subplot(2,3,6); axis off;
@@ -535,12 +795,16 @@ if makeSnapshotPlots
                 sprintf('Frame: %d', fr)
                 sprintf('Time: %.2f min', time_min(fr))
                 ''
+                'Reference Frame:'
+                sprintf('  AV axis: %.1f° from x-axis', rad2deg(avAxisAngle))
+                sprintf('  θ=0 → Animal Pole')
+                ''
                 'Tangential Flow Statistics:'
                 sprintf('  Mean: %.3f μm/s', mean(vtheta_valid))
                 sprintf('  Median: %.3f μm/s', median(vtheta_valid))
                 sprintf('  Std: %.3f μm/s', std(vtheta_valid))
-                sprintf('  Max: %.3f μm/s', max(vtheta_valid))
-                sprintf('  Min: %.3f μm/s', min(vtheta_valid))
+                sprintf('  Max (CCW): %.3f μm/s', max(vtheta_valid))
+                sprintf('  Min (CW): %.3f μm/s', min(vtheta_valid))
                 ''
                 sprintf('Mask area: %.0f px²', areaMask(fr))
                 sprintf('Centroid: (%.1f, %.1f)', xc, yc)
@@ -562,10 +826,16 @@ end
 
 fprintf('All visualizations complete!\n\n');
 
+% Prepare AV axis length for saving (handle case where it wasn't computed)
+if ~exist('avAxisLength_um_global', 'var')
+    avAxisLength_um_global = NaN;
+end
+
 save(fullfile(outDir,'tangential_kymo_results.mat'), ...
      'Vtheta_kymo','Npts_kymo','thetaCenters','thetaBinEdges','time_min', ...
      'centroidXY','areaMask','qcFlag','RADIUS_OF_CURVATURE', ...
-     'px_per_um','dt_sec','bandOuterPx','bandInnerPx','pivMatFile','base_dir');
+     'px_per_um','dt_sec','bandOuterPx','bandInnerPx','pivMatFile','base_dir', ...
+     'avAxisAngle','avAxisMode','avAxisLength_um_global');  % Include AV axis info for downstream analysis
 
 fprintf('Saved outputs to: %s\n', outDir);
 
@@ -767,13 +1037,25 @@ end
 
 function [vBins, nCount, dbg] = tangential_from_boundary_curvature( ...
     X, Y, U, V, BW, poly, centroid, bandOuterPx, bandInnerPx, nThetaBins, thetaBinEdges, ...
-    px_per_um, dt_sec, pivVelUnit, nDenseSpline)
+    px_per_um, dt_sec, pivVelUnit, nDenseSpline, avAxisAngle)
 % Calculate tangential velocity field using curvature-based boundary.
 % STRICT PHYSICAL ENCODING:
 % - Tangent vectors computed from smooth polynomial boundary
 % - Velocities converted to physical units (um/s)
 % - Tangential component: v_tangent = v · t̂ (dot product with unit tangent)
 % - Binned by angular position theta around oocyte centroid
+%
+% AV AXIS REFERENCE FRAME:
+% - avAxisAngle (radians) defines the AV axis direction from centroid
+% - θ=0 corresponds to the AV axis direction (toward animal pole)
+% - θ increases counterclockwise from the AV axis
+% - CCW (positive v_θ): flow in direction of increasing θ
+% - CW (negative v_θ): flow in direction of decreasing θ
+
+% Default avAxisAngle to 0 if not provided (backward compatibility)
+if nargin < 16 || isempty(avAxisAngle)
+    avAxisAngle = 0;
+end
 
 % Convert velocities to um/s (strict physical units)
 [U_um_s, V_um_s] = convertVelToUmPerSec(U, V, pivVelUnit, px_per_um, dt_sec);
@@ -869,9 +1151,13 @@ vT = uq.*tqx + vq.*tqy;  % tangential velocity [um/s]
 
 % Theta coordinate assigned from nearest boundary point relative to centroid
 % This maintains angular position consistency with curvature calculation
+%
+% AV AXIS REFERENCE: θ is measured relative to the AV axis direction
+% - θ=0 points along the AV axis (toward animal pole)
+% - θ increases counterclockwise from the AV axis
 cx = centroid(1); cy = centroid(2);
-th = atan2(yDense(idxNearest) - cy, xDense(idxNearest) - cx);
-th = wrapTo2Pi(th);
+th_raw = atan2(yDense(idxNearest) - cy, xDense(idxNearest) - cx);
+th = wrapTo2Pi(th_raw - avAxisAngle);  % Rotate so θ=0 aligns with AV axis
 
 % Bin into theta bins (angular averaging)
 vBins = nan(1,nThetaBins);
@@ -958,4 +1244,149 @@ if exist('brewermap', 'file')
     cmap = brewermap(n, 'RdBu');
     cmap = flipud(cmap);  % flip so red=positive
 end
+end
+
+function [aniPt, vegPt, axisLength] = findAVAxisBoundaryIntersections(poly, centroid, avAngle)
+% FINDAVAXISBOUNDARYINTERSECTIONS  Find where the AV axis intersects the boundary
+%
+% Given the boundary polygon and the AV axis angle, this function finds the
+% two points where a line through the centroid along the AV axis intersects
+% the oocyte boundary. This provides the actual cell diameter along the AV axis.
+%
+% INPUTS:
+%   poly      - Nx2 array of boundary polygon [x, y] coordinates
+%   centroid  - [xc, yc] centroid of the oocyte
+%   avAngle   - AV axis angle in radians (direction toward animal pole)
+%
+% OUTPUTS:
+%   aniPt      - [x, y] of animal pole boundary intersection
+%   vegPt      - [x, y] of vegetal pole boundary intersection
+%   axisLength - Distance between the two intersections (in pixels)
+
+xc = centroid(1);
+yc = centroid(2);
+
+% Compute angle of each boundary point relative to centroid
+poly_angles = atan2(poly(:,2) - yc, poly(:,1) - xc);
+poly_angles = wrapTo2Pi(poly_angles);
+
+% Find boundary points closest to the AV axis directions
+% Animal pole direction
+ani_angle = wrapTo2Pi(avAngle);
+
+% Vegetal pole direction (opposite)
+veg_angle = wrapTo2Pi(avAngle + pi);
+
+% Find the boundary point closest to each direction
+[~, ani_idx] = min(abs(wrapToPi(poly_angles - ani_angle)));
+[~, veg_idx] = min(abs(wrapToPi(poly_angles - veg_angle)));
+
+aniPt = [poly(ani_idx, 1), poly(ani_idx, 2)];
+vegPt = [poly(veg_idx, 1), poly(veg_idx, 2)];
+
+axisLength = hypot(aniPt(1) - vegPt(1), aniPt(2) - vegPt(2));
+
+end
+
+function avAngle = detectAVAxis(I, BW, centroid, mode, manualAngle, animalPt, vegetalPt)
+% DETECTAVAXIS  Compute the AV (animal-vegetal) axis angle from oocyte image
+%
+% The AV axis is the primary biological reference axis for oocytes.
+% This function returns the angle (in radians, standard atan2 convention)
+% pointing from the centroid TOWARD the animal pole.
+%
+% INPUTS:
+%   I          - Grayscale image (oocyte should be darker than background)
+%   BW         - Binary mask of oocyte region
+%   centroid   - [xc, yc] centroid of the oocyte
+%   mode       - Detection method:
+%                'manual_angle'   - Use manualAngle directly
+%                'manual_points'  - Compute from animal/vegetal pole coordinates
+%                'auto_intensity' - Detect from intensity asymmetry (first moment)
+%   manualAngle - (optional) Angle in radians for 'manual_angle' mode
+%   animalPt    - (optional) [x, y] animal pole for 'manual_points' mode
+%   vegetalPt   - (optional) [x, y] vegetal pole for 'manual_points' mode
+%
+% OUTPUT:
+%   avAngle    - Angle in radians from positive x-axis to animal pole direction
+%                (measured from centroid, standard atan2 convention)
+%
+% DIRECTIONALITY CONVENTION:
+%   Once avAngle is established:
+%   - θ=0 corresponds to the AV axis direction (toward animal pole)
+%   - CCW (positive v_θ): flow counterclockwise when animal pole is at top
+%   - CW (negative v_θ): flow clockwise when animal pole is at top
+
+switch lower(mode)
+    case 'manual_angle'
+        % User specifies angle directly
+        avAngle = manualAngle;
+        fprintf('AV axis: manual angle = %.2f rad (%.1f deg)\n', avAngle, rad2deg(avAngle));
+
+    case 'manual_points'
+        % Compute angle from vegetal pole to animal pole
+        % AV axis points from V toward A
+        dx = animalPt(1) - vegetalPt(1);
+        dy = animalPt(2) - vegetalPt(2);
+        avAngle = atan2(dy, dx);
+        fprintf('AV axis: from points, angle = %.2f rad (%.1f deg)\n', avAngle, rad2deg(avAngle));
+        fprintf('  Animal pole: (%.1f, %.1f)\n', animalPt(1), animalPt(2));
+        fprintf('  Vegetal pole: (%.1f, %.1f)\n', vegetalPt(1), vegetalPt(2));
+
+    case 'auto_intensity'
+        % Auto-detect from intensity first moment (centroid of intensity)
+        %
+        % Biological basis: In many oocytes, the animal pole region has different
+        % optical properties (e.g., different retardance, different scattering).
+        % The intensity-weighted centroid will be offset from the geometric
+        % centroid, and this offset direction often correlates with the AV axis.
+        %
+        % Note: This is a heuristic - the direction depends on whether the
+        % animal or vegetal pole is brighter/darker. User may need to flip by π.
+
+        [H, W] = size(I);
+        [Xgrid, Ygrid] = meshgrid(1:W, 1:H);
+
+        % Intensity within mask
+        Imask = double(I);
+        Imask(~BW) = NaN;
+
+        % First moment (intensity-weighted centroid)
+        totalInt = sum(Imask(:), 'omitnan');
+        if totalInt > 0
+            intCentroidX = sum(Xgrid(:) .* Imask(:), 'omitnan') / totalInt;
+            intCentroidY = sum(Ygrid(:) .* Imask(:), 'omitnan') / totalInt;
+        else
+            intCentroidX = centroid(1);
+            intCentroidY = centroid(2);
+        end
+
+        % Offset from geometric centroid to intensity centroid
+        dx = intCentroidX - centroid(1);
+        dy = intCentroidY - centroid(2);
+
+        if hypot(dx, dy) < 1
+            % No detectable asymmetry - default to positive x-axis
+            warning('AV axis auto-detection: no significant intensity asymmetry detected.');
+            avAngle = 0;
+        else
+            % Intensity centroid offset points toward the optically distinct pole
+            % Convention: we assume brighter region = animal pole
+            % (adjust in your code or flip by π if this doesn't match your data)
+            avAngle = atan2(dy, dx);
+        end
+
+        fprintf('AV axis: auto-detected from intensity asymmetry\n');
+        fprintf('  Geometric centroid: (%.1f, %.1f)\n', centroid(1), centroid(2));
+        fprintf('  Intensity centroid: (%.1f, %.1f)\n', intCentroidX, intCentroidY);
+        fprintf('  Offset: (%.2f, %.2f) px\n', dx, dy);
+        fprintf('  AV angle = %.2f rad (%.1f deg)\n', avAngle, rad2deg(avAngle));
+
+    otherwise
+        warning('Unknown AV axis mode: %s. Using default (0 rad).', mode);
+        avAngle = 0;
+end
+
+% Normalize to [0, 2π)
+avAngle = wrapTo2Pi(avAngle);
 end
