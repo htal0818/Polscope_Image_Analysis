@@ -53,9 +53,10 @@ dt_sec    = 15;       % sec/frame
 pivVelUnit = 'px_per_frame';  % 'px_per_frame' or 'px_per_sec'
 
 % --- Cortical band definition (STRICT): pixels INSIDE boundary ---
-% Example: bandOuter=3, bandInner=12  => sample points 3–12 px inside cortex
-bandOuterPx = 3;
-bandInnerPx = 12;
+% Example: bandOuter=1, bandInner=20  => sample points 1–20 px inside cortex
+% Wider band captures more cortical flow signal
+bandOuterPx = 1;
+bandInnerPx = 20;
 
 % --- Curvature-based boundary parameters (from kymograph.m methodology) ---
 sigmaBlur       = 1.0;           % pre-blur (pixels); keep small to preserve edge
@@ -382,11 +383,17 @@ end
 if makeQuiverOverlays
     fprintf('  - Generating quiver overlays...\n');
 
-    % Auto-select frames if not specified
-    if isempty(snapshotFrames)
-        % Select ~5 frames evenly spaced
-        snapshotFrames = round(linspace(1, nFrames, min(5, nFrames)));
-    end
+    % Compute global velocity range for consistent colorbar across all frames
+    allVtheta = Vtheta_kymo(qcFlag, :);
+    vmin_global = min(allVtheta(:), [], 'omitnan');
+    vmax_global = max(allVtheta(:), [], 'omitnan');
+    vabs_max = max(abs([vmin_global, vmax_global]));
+
+    % Use symmetric color limits for diverging colormap
+    clim_quiver = [-vabs_max, vabs_max];
+
+    % Create diverging colormap (blue=CW/negative, white=zero, red=CCW/positive)
+    cmap_diverge = redblue(256);
 
     for fr = 1:quiverEveryNFrames:nFrames
         if ~qcFlag(fr), continue; end
@@ -401,11 +408,11 @@ if makeQuiverOverlays
         vtheta = Vtheta_kymo(fr, :);
 
         % Create figure
-        figQ = figure('Visible', 'off', 'Position', [100 100 800 800]);
+        figQ = figure('Visible', 'off', 'Position', [100 100 900 800]);
         imshow(I, []); hold on; axis on;
 
-        % Plot boundary
-        plot(poly(:,1), poly(:,2), 'y-', 'LineWidth', 2);
+        % Plot boundary (thinner, cyan for contrast)
+        plot(poly(:,1), poly(:,2), 'c-', 'LineWidth', 1);
 
         % Compute quiver positions and vectors
         thetaSubsample = 1:quiverSubsample:nThetaBins;
@@ -415,52 +422,79 @@ if makeQuiverOverlays
         yq = zeros(nQuiver, 1);
         uq = zeros(nQuiver, 1);
         vq = zeros(nQuiver, 1);
+        vq_color = zeros(nQuiver, 1);  % velocity values for coloring
 
         for k = 1:nQuiver
             idx = thetaSubsample(k);
             theta_k = thetaCenters(idx);
             vtheta_k = vtheta(idx);
 
-            if isnan(vtheta_k), continue; end
+            if isnan(vtheta_k)
+                vq_color(k) = NaN;
+                continue;
+            end
 
             % Position on boundary (approximate using polar coordinates from center)
-            % Use mean radius for visualization
             R_mean = mean(RADIUS_OF_CURVATURE(fr, :), 'omitnan');
-            if isnan(R_mean), R_mean = 100; end  % fallback
+            if isnan(R_mean), R_mean = 100; end
 
             xq(k) = xc + R_mean * cos(theta_k);
             yq(k) = yc + R_mean * sin(theta_k);
 
             % Tangent vector (perpendicular to radial direction)
-            % For counterclockwise tangent: rotate radial vector by 90 degrees
-            tx = -sin(theta_k);  % tangent x component
-            ty = cos(theta_k);   % tangent y component
+            tx = -sin(theta_k);
+            ty = cos(theta_k);
 
-            % Scale by velocity (convert to pixels for visualization)
-            % vtheta_k is in μm/s, convert to pixels for arrow length
-            arrow_scale = quiverScale * vtheta_k / px_per_um;  % pixels
+            % Scale by velocity magnitude (always positive for arrow length)
+            % Direction is encoded by the tangent vector sign
+            arrow_scale = quiverScale * abs(vtheta_k) / px_per_um;  % pixels
+
+            % Flip direction for negative (CW) velocities
+            if vtheta_k < 0
+                tx = -tx;
+                ty = -ty;
+            end
 
             uq(k) = arrow_scale * tx;
             vq(k) = arrow_scale * ty;
+            vq_color(k) = vtheta_k;  % store actual velocity for color
         end
 
         % Remove NaN entries
-        valid = ~isnan(uq) & ~isnan(vq);
+        valid = ~isnan(vq_color) & (xq ~= 0 | yq ~= 0);
         xq = xq(valid); yq = yq(valid);
         uq = uq(valid); vq = vq(valid);
+        vq_color = vq_color(valid);
 
-        % Plot quiver (no autoscale, we already scaled)
-        quiver(xq, yq, uq, vq, 0, 'Color', [0 1 0], 'LineWidth', 1.5, 'MaxHeadSize', 0.5);
+        % Draw color-coded arrows individually
+        % Map velocity to colormap index
+        nColors = size(cmap_diverge, 1);
+        colorIdx = round((vq_color - clim_quiver(1)) / (clim_quiver(2) - clim_quiver(1)) * (nColors - 1)) + 1;
+        colorIdx = max(1, min(nColors, colorIdx));  % clamp to valid range
 
-        title(sprintf('Frame %d: Tangential Flow Vectors (t=%.2f min)', fr, time_min(fr)), ...
-            'FontSize', 12, 'Color', 'w');
+        for k = 1:numel(xq)
+            arrowColor = cmap_diverge(colorIdx(k), :);
 
-        % Add colorbar to show velocity scale
-        scatter([], [], [], 'Visible', 'off');  % dummy for colorbar
+            % Draw arrow as line with arrowhead
+            quiver(xq(k), yq(k), uq(k), vq(k), 0, ...
+                'Color', arrowColor, 'LineWidth', 1.5, 'MaxHeadSize', 2);
+        end
+
+        % Add scatter plot to drive the colorbar (invisible dots)
+        hScatter = scatter(xq, yq, 1, vq_color, 'filled');
+        set(hScatter, 'MarkerFaceAlpha', 0);  % make invisible
+
+        % Set colormap and color limits
+        colormap(gca, cmap_diverge);
+        caxis(clim_quiver);
+
+        % Add colorbar
         cb = colorbar;
-        colormap(gca, 'parula');
-        caxis([min(vtheta, [], 'omitnan'), max(vtheta, [], 'omitnan')]);
-        ylabel(cb, 'v_\theta (μm/s)', 'FontSize', 10, 'Color', 'w');
+        ylabel(cb, 'v_\theta (\mum/s): red=CCW, blue=CW', 'FontSize', 10, 'Color', 'w');
+        set(cb, 'Color', 'w');  % white tick labels
+
+        title(sprintf('Frame %d: Tangential Flow (t=%.2f min)', fr, time_min(fr)), ...
+            'FontSize', 12, 'Color', 'w');
 
         exportgraphics(figQ, fullfile(outDir_quiver, sprintf('quiver_tangential_fr%04d.png', fr)), ...
             'Resolution', 200);
