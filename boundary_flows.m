@@ -71,17 +71,53 @@ thetaCenters = thetaEdges;        % treat as centers for output
 thetaBinEdges = linspace(0,2*pi,nThetaBins+1);
 
 % --- Boundary smoothing / spline sampling ---
-nDenseSpline = 2500;   % dense samples along spline for nearest-point lookup
+nDenseSpline = 5000;   % dense samples along boundary for smooth nearest-point lookup (increased density)
 
 % --- Quality control thresholds ---
 minAreaFrac  = 0.05;   % reject if mask area < frac of image area
 maxEccentric = 0.95;   % reject if region is too eccentric (bad segmentation)
 minSolidity  = 0.85;   % reject if region solidity too low (noisy boundary)
 
+% ============================================================================
+% --- SMART CACHING FOR MASK REUSABILITY ---
+% Set useMaskCaching = false to disable and recalculate every frame
+% ============================================================================
+useMaskCaching = true;   % MASTER SWITCH: set to false to disable all caching
+
+% Caching strategy (only active if useMaskCaching = true):
+cacheIntensityThreshold = 0.02;  % Reuse mask if mean intensity change < 2%
+cacheForceRecalcEveryN  = 25;    % Force full recalc every N frames (drift correction)
+cacheUseHintCenter      = true;  % Use previous center as circle fit initialization
+
 % --- Outputs ---
 outDir = fullfile(base_dir, 'tangential_kymo_out');
 if ~exist(outDir,'dir'); mkdir(outDir); end
+
+% Create subdirectories for organized outputs
+outDir_kymographs = fullfile(outDir, 'kymographs');
+outDir_quiver = fullfile(outDir, 'quiver_overlays');
+outDir_snapshots = fullfile(outDir, 'snapshots');
+outDir_qc = fullfile(outDir, 'qc');
+
+if ~exist(outDir_kymographs,'dir'); mkdir(outDir_kymographs); end
+if ~exist(outDir_quiver,'dir'); mkdir(outDir_quiver); end
+if ~exist(outDir_snapshots,'dir'); mkdir(outDir_snapshots); end
+if ~exist(outDir_qc,'dir'); mkdir(outDir_qc); end
+
 saveEveryN_QC = 20;
+
+% ============================================================================
+% --- VISUALIZATION SETTINGS ---
+% ============================================================================
+makeQuiverOverlays = true;   % Create quiver plot overlays on oocyte boundary
+quiverEveryNFrames = 10;     % Save quiver overlay every N frames
+quiverSubsample = 3;         % Subsample theta bins for quiver (every Nth bin)
+quiverScale = 1.5;           % Arrow length scaling factor
+
+makeEnhancedKymographs = true;  % Create magnitude + signed directional kymographs
+makeSnapshotPlots = true;       % Create detailed snapshot visualizations
+snapshotFrames = [];            % Specific frames to visualize (empty = auto-select)
+snapshotEveryNFrames = 2;       % Save tangential flow analysis every N frames
 
 %% ========================== LOAD PIV DATA =================================
 S = load(pivMatFile);
@@ -99,6 +135,20 @@ centroidXY  = nan(nFrames,2);
 areaMask    = nan(nFrames,1);
 qcFlag      = false(nFrames,1);           % true if frame passes QC
 RADIUS_OF_CURVATURE = nan(nFrames, numel(thetaCenters)-1);  % radius of curvature per theta bin
+
+% --- Cache variables (for smart mask reusability) ---
+cache_prevBW = [];           % Previous mask
+cache_prevCenter = [];       % Previous [xc, yc]
+cache_prevRadius = [];       % Previous mean radius
+cache_prevMeanInt = [];      % Previous mean intensity in mask region
+cache_prevPoly = [];         % Previous boundary polygon
+cache_prevRADIUS = [];       % Previous curvature array
+cacheHitCount = 0;           % Diagnostic: number of cache reuses
+cacheRecalcCount = 0;        % Diagnostic: number of full recalculations
+
+% --- Visualization data storage ---
+visPolySeq = cell(nFrames,1);     % Store polygon for each frame (for quiver plots)
+visImageSeq = cell(nFrames,1);    % Store normalized images (for overlays)
 
 %% ========================== MAIN LOOP =====================================
 for fr = 1:nFrames
@@ -120,11 +170,97 @@ for fr = 1:nFrames
 
     I = mat2gray(Iraw);
 
-    %% ----- Curvature-based oocyte mask (from kymograph.m methodology) -----
-    [BW, stats, poly, RADIUS, xc, yc] = make_oocyte_mask_curvature(I, ...
-        sigmaBlur, threshFrac, se, polyOrder, nBoundary, thetaCenters, ...
-        minAreaFrac, maxEccentric, minSolidity);
+    %% =========================================================================
+    %% SMART CACHING BLOCK - Set useMaskCaching = false at top to disable
+    %% =========================================================================
 
+    % --- Decide if we need full recalculation or can reuse previous mask ---
+    needsRecalc = true;  % default: recalculate
+    cacheReasonStr = 'first frame';
+
+    if useMaskCaching && ~isempty(cache_prevBW)
+        % Check cache validity criteria
+
+        % Criterion 1: Force recalculation every N frames (drift correction)
+        if mod(fr, cacheForceRecalcEveryN) == 1
+            needsRecalc = true;
+            cacheReasonStr = sprintf('forced recalc (every %d frames)', cacheForceRecalcEveryN);
+        else
+            % Criterion 2: Check intensity change in previous mask region
+            meanIntCurrent = mean(I(cache_prevBW), 'omitnan');
+            intensityChange = abs(meanIntCurrent - cache_prevMeanInt) / (cache_prevMeanInt + eps);
+
+            if intensityChange < cacheIntensityThreshold
+                needsRecalc = false;  % CACHE HIT!
+                cacheReasonStr = sprintf('cache hit (Δintensity=%.3f%%)', intensityChange*100);
+            else
+                needsRecalc = true;  % CACHE MISS
+                cacheReasonStr = sprintf('intensity changed %.3f%%', intensityChange*100);
+            end
+        end
+    end
+
+    % --- Execute mask calculation (with or without caching) ---
+    if needsRecalc || ~useMaskCaching
+        % FULL RECALCULATION
+        if ~useMaskCaching
+            cacheReasonStr = 'caching disabled';
+        end
+
+        % Optionally use previous center as initialization hint
+        centerHint = [];
+        if useMaskCaching && cacheUseHintCenter && ~isempty(cache_prevCenter)
+            centerHint = cache_prevCenter;
+        end
+
+        [BW, stats, poly, RADIUS, xc, yc] = make_oocyte_mask_curvature(I, ...
+            sigmaBlur, threshFrac, se, polyOrder, nBoundary, thetaCenters, ...
+            minAreaFrac, maxEccentric, minSolidity, centerHint);
+
+        if isempty(stats)
+            fprintf('Frame %d: mask failed QC (%s).\n', fr, cacheReasonStr);
+            continue;
+        end
+
+        % Update cache
+        if useMaskCaching
+            cache_prevBW = BW;
+            cache_prevCenter = [xc, yc];
+            cache_prevRadius = mean(RADIUS, 'omitnan');
+            cache_prevMeanInt = mean(I(BW), 'omitnan');
+            cache_prevPoly = poly;
+            cache_prevRADIUS = RADIUS;
+        end
+
+        cacheRecalcCount = cacheRecalcCount + 1;
+
+    else
+        % CACHE REUSE
+        BW = cache_prevBW;
+        poly = cache_prevPoly;
+        RADIUS = cache_prevRADIUS;
+        xc = cache_prevCenter(1);
+        yc = cache_prevCenter(2);
+
+        % Quick QC check on cached mask
+        stats = regionprops(BW, 'Area', 'Eccentricity', 'Centroid', 'Solidity');
+        if isempty(stats)
+            fprintf('Frame %d: cached mask invalid, forcing recalc.\n', fr);
+            % Force recalculation next iteration
+            cache_prevBW = [];
+            continue;
+        end
+        [~, ii] = max([stats.Area]);
+        stats = stats(ii);
+
+        cacheHitCount = cacheHitCount + 1;
+    end
+
+    %% =========================================================================
+    %% END SMART CACHING BLOCK
+    %% =========================================================================
+
+    % Store results (common path for both cached and recalculated)
     if isempty(stats)
         fprintf('Frame %d: mask failed QC.\n', fr);
         continue;
@@ -153,33 +289,278 @@ for fr = 1:nFrames
     Vtheta_kymo(fr,:) = vBins;
     Npts_kymo(fr,:)   = nBinsCount;
 
+    %% ----- Store visualization data -----
+    visPolySeq{fr} = poly;
+    visImageSeq{fr} = I;
+
     %% ----- QC overlays (saved periodically) -----
     if mod(fr, saveEveryN_QC) == 1
         qcFig = figure('Visible','off'); imshow(I,[]); hold on;
         plot(dbgFlow.xDense, dbgFlow.yDense, 'LineWidth', 2);
         scatter(dbgFlow.sampleX, dbgFlow.sampleY, 8, 'filled');
-        title(sprintf('Frame %d boundary spline + sampled PIV band points', fr));
-        exportgraphics(qcFig, fullfile(outDir, sprintf('QC_boundary_band_fr%04d.png', fr)), 'Resolution', 250);
+        title(sprintf('Frame %d boundary + sampled PIV band points', fr));
+        exportgraphics(qcFig, fullfile(outDir_qc, sprintf('QC_boundary_band_fr%04d.png', fr)), 'Resolution', 250);
         close(qcFig);
     end
 
     if mod(fr,50)==0
-        fprintf('Processed frame %d/%d\n', fr, nFrames);
+        fprintf('Processed frame %d/%d (%s)\n', fr, nFrames, cacheReasonStr);
     end
 end
 
-%% ========================== PLOT KYMOGRAPH =================================
+%% ========================== CACHE DIAGNOSTICS ================================
+if useMaskCaching
+    totalProcessed = cacheHitCount + cacheRecalcCount;
+    cacheHitRate = 100 * cacheHitCount / max(1, totalProcessed);
+    fprintf('\n=== SMART CACHING PERFORMANCE ===\n');
+    fprintf('Cache hits:        %d/%d (%.1f%%)\n', cacheHitCount, totalProcessed, cacheHitRate);
+    fprintf('Recalculations:    %d/%d (%.1f%%)\n', cacheRecalcCount, totalProcessed, 100-cacheHitRate);
+    fprintf('Estimated speedup: %.1fx\n', 1 + (cacheHitCount * 9) / max(1, totalProcessed));
+    fprintf('=================================\n\n');
+else
+    fprintf('\nSmart caching was DISABLED (useMaskCaching=false)\n\n');
+end
+
+%% ========================== VISUALIZATIONS ===================================
 time_min = (0:nFrames-1) * (dt_sec/60);
 
-fig1 = figure;
-imagesc(rad2deg(thetaCenters), time_min, Vtheta_kymo);
-axis tight;
-xlabel('\theta (deg)');
-ylabel('Time (min)');
-title('Tangential cortical flow v_\theta(\theta,t) (um/s)');
-colorbar;
+fprintf('Generating visualizations...\n');
 
-exportgraphics(fig1, fullfile(outDir,'kymograph_vtheta.png'), 'Resolution', 300);
+% --- 1) BASIC SIGNED KYMOGRAPH (original) ---
+fig1 = figure('Position', [100 100 1000 600]);
+imagesc(1:nThetaBins, time_min, Vtheta_kymo);
+axis tight;
+xlabel('Angular Bin Number', 'FontSize', 12);
+ylabel('Time (min)', 'FontSize', 12);
+title('Tangential Cortical Flow v_\theta(\theta,t) - Signed (μm/s)', 'FontSize', 14);
+colormap(gca, 'parula');
+cb = colorbar;
+ylabel(cb, 'v_\theta (μm/s)', 'FontSize', 11);
+set(gca, 'FontSize', 11);
+exportgraphics(fig1, fullfile(outDir_kymographs,'kymograph_vtheta_signed.png'), 'Resolution', 300);
+
+if makeEnhancedKymographs
+    % --- 2) MAGNITUDE KYMOGRAPH (absolute values) ---
+    fig2 = figure('Position', [100 100 1000 600]);
+    imagesc(1:nThetaBins, time_min, abs(Vtheta_kymo));
+    axis tight;
+    xlabel('Angular Bin Number', 'FontSize', 12);
+    ylabel('Time (min)', 'FontSize', 12);
+    title('Tangential Flow Magnitude |v_\theta(\theta,t)| (μm/s)', 'FontSize', 14);
+    colormap(gca, 'hot');
+    cb = colorbar;
+    ylabel(cb, '|v_\theta| (μm/s)', 'FontSize', 11);
+    set(gca, 'FontSize', 11);
+    exportgraphics(fig2, fullfile(outDir_kymographs,'kymograph_vtheta_magnitude.png'), 'Resolution', 300);
+
+    % --- 3) DIRECTIONAL KYMOGRAPH (diverging colormap) ---
+    fig3 = figure('Position', [100 100 1000 600]);
+    imagesc(1:nThetaBins, time_min, Vtheta_kymo);
+    axis tight;
+    xlabel('Angular Bin Number', 'FontSize', 12);
+    ylabel('Time (min)', 'FontSize', 12);
+    title('Tangential Flow Directionality (μm/s)', 'FontSize', 14);
+
+    % Diverging colormap: blue (negative/clockwise) to red (positive/counterclockwise)
+    colormap(gca, redblue(256));
+
+    % Symmetric color limits around zero
+    vmax = max(abs(Vtheta_kymo(:)), [], 'omitnan');
+    if ~isnan(vmax) && vmax > 0
+        clim([-vmax, vmax]);
+    end
+
+    cb = colorbar;
+    ylabel(cb, 'v_\theta (μm/s): red=CCW, blue=CW', 'FontSize', 10);
+    set(gca, 'FontSize', 11);
+    exportgraphics(fig3, fullfile(outDir_kymographs,'kymograph_vtheta_directional.png'), 'Resolution', 300);
+
+    fprintf('  - Saved 3 kymograph variants\n');
+end
+
+% --- 4) QUIVER OVERLAYS (tangential flow vectors on boundary) ---
+if makeQuiverOverlays
+    fprintf('  - Generating quiver overlays...\n');
+
+    % Auto-select frames if not specified
+    if isempty(snapshotFrames)
+        % Select ~5 frames evenly spaced
+        snapshotFrames = round(linspace(1, nFrames, min(5, nFrames)));
+    end
+
+    for fr = 1:quiverEveryNFrames:nFrames
+        if ~qcFlag(fr), continue; end
+
+        I = visImageSeq{fr};
+        poly = visPolySeq{fr};
+        if isempty(I) || isempty(poly), continue; end
+
+        % Get center and tangential velocities
+        xc = centroidXY(fr, 1);
+        yc = centroidXY(fr, 2);
+        vtheta = Vtheta_kymo(fr, :);
+
+        % Create figure
+        figQ = figure('Visible', 'off', 'Position', [100 100 800 800]);
+        imshow(I, []); hold on; axis on;
+
+        % Plot boundary
+        plot(poly(:,1), poly(:,2), 'y-', 'LineWidth', 2);
+
+        % Compute quiver positions and vectors
+        thetaSubsample = 1:quiverSubsample:nThetaBins;
+        nQuiver = numel(thetaSubsample);
+
+        xq = zeros(nQuiver, 1);
+        yq = zeros(nQuiver, 1);
+        uq = zeros(nQuiver, 1);
+        vq = zeros(nQuiver, 1);
+
+        for k = 1:nQuiver
+            idx = thetaSubsample(k);
+            theta_k = thetaCenters(idx);
+            vtheta_k = vtheta(idx);
+
+            if isnan(vtheta_k), continue; end
+
+            % Position on boundary (approximate using polar coordinates from center)
+            % Use mean radius for visualization
+            R_mean = mean(RADIUS_OF_CURVATURE(fr, :), 'omitnan');
+            if isnan(R_mean), R_mean = 100; end  % fallback
+
+            xq(k) = xc + R_mean * cos(theta_k);
+            yq(k) = yc + R_mean * sin(theta_k);
+
+            % Tangent vector (perpendicular to radial direction)
+            % For counterclockwise tangent: rotate radial vector by 90 degrees
+            tx = -sin(theta_k);  % tangent x component
+            ty = cos(theta_k);   % tangent y component
+
+            % Scale by velocity (convert to pixels for visualization)
+            % vtheta_k is in μm/s, convert to pixels for arrow length
+            arrow_scale = quiverScale * vtheta_k / px_per_um;  % pixels
+
+            uq(k) = arrow_scale * tx;
+            vq(k) = arrow_scale * ty;
+        end
+
+        % Remove NaN entries
+        valid = ~isnan(uq) & ~isnan(vq);
+        xq = xq(valid); yq = yq(valid);
+        uq = uq(valid); vq = vq(valid);
+
+        % Plot quiver (no autoscale, we already scaled)
+        quiver(xq, yq, uq, vq, 0, 'Color', [0 1 0], 'LineWidth', 1.5, 'MaxHeadSize', 0.5);
+
+        title(sprintf('Frame %d: Tangential Flow Vectors (t=%.2f min)', fr, time_min(fr)), ...
+            'FontSize', 12, 'Color', 'w');
+
+        % Add colorbar to show velocity scale
+        scatter([], [], [], 'Visible', 'off');  % dummy for colorbar
+        cb = colorbar;
+        colormap(gca, 'parula');
+        caxis([min(vtheta, [], 'omitnan'), max(vtheta, [], 'omitnan')]);
+        ylabel(cb, 'v_\theta (μm/s)', 'FontSize', 10, 'Color', 'w');
+
+        exportgraphics(figQ, fullfile(outDir_quiver, sprintf('quiver_tangential_fr%04d.png', fr)), ...
+            'Resolution', 200);
+        close(figQ);
+    end
+
+    fprintf('  - Saved %d quiver overlays to %s\n', numel(1:quiverEveryNFrames:nFrames), outDir_quiver);
+end
+
+% --- 5) SNAPSHOT DETAILED VISUALIZATIONS (Tangential Flow Analysis) ---
+if makeSnapshotPlots
+    fprintf('  - Generating tangential flow analysis plots (every %d frames)...\n', snapshotEveryNFrames);
+
+    for fr = 1:snapshotEveryNFrames:nFrames
+        if ~qcFlag(fr), continue; end
+
+        I = visImageSeq{fr};
+        poly = visPolySeq{fr};
+        if isempty(I) || isempty(poly), continue; end
+
+        xc = centroidXY(fr, 1);
+        yc = centroidXY(fr, 2);
+        vtheta = Vtheta_kymo(fr, :);
+        radius_curv = RADIUS_OF_CURVATURE(fr, :);
+
+        % Create multi-panel figure
+        figSnap = figure('Position', [50 50 1400 800]);
+
+        % Panel 1: Image with boundary and quiver
+        subplot(2,3,1);
+        imshow(I, []); hold on;
+        plot(poly(:,1), poly(:,2), 'y-', 'LineWidth', 2);
+        plot(xc, yc, 'r+', 'MarkerSize', 12, 'LineWidth', 2);
+        title(sprintf('Frame %d (t=%.2f min)', fr, time_min(fr)));
+
+        % Panel 2: Tangential velocity profile
+        subplot(2,3,2);
+        plot(1:nThetaBins, vtheta, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 8);
+        xlabel('Angular Bin Number'); ylabel('v_\theta (μm/s)');
+        title('Tangential Velocity Profile');
+        grid on;
+        xlim([1 nThetaBins]);
+
+        % Panel 3: Curvature profile
+        subplot(2,3,3);
+        plot(1:nThetaBins-1, radius_curv, 'r.-', 'LineWidth', 1.5, 'MarkerSize', 8);
+        xlabel('Angular Bin Number'); ylabel('Radius of Curvature (px)');
+        title('Boundary Curvature');
+        grid on;
+        xlim([1 nThetaBins-1]);
+
+        % Panel 4: Polar plot of tangential velocity
+        subplot(2,3,4);
+        polarplot(thetaCenters, abs(vtheta), 'b-', 'LineWidth', 2);
+        title('|v_\theta| Magnitude (Polar)');
+
+        % Panel 5: Signed polar plot
+        subplot(2,3,5);
+        % For signed polar plot, show as two colors
+        pos_idx = vtheta >= 0;
+        neg_idx = vtheta < 0;
+        polarplot(thetaCenters(pos_idx), vtheta(pos_idx), 'r.', 'MarkerSize', 8); hold on;
+        polarplot(thetaCenters(neg_idx), abs(vtheta(neg_idx)), 'b.', 'MarkerSize', 8);
+        title('v_\theta Directionality');
+        legend({'CCW (+)', 'CW (-)'}, 'Location', 'northeast');  % Top right corner
+
+        % Panel 6: Statistics
+        subplot(2,3,6); axis off;
+        vtheta_valid = vtheta(~isnan(vtheta));
+        if ~isempty(vtheta_valid)
+            stats_text = {
+                sprintf('Frame: %d', fr)
+                sprintf('Time: %.2f min', time_min(fr))
+                ''
+                'Tangential Flow Statistics:'
+                sprintf('  Mean: %.3f μm/s', mean(vtheta_valid))
+                sprintf('  Median: %.3f μm/s', median(vtheta_valid))
+                sprintf('  Std: %.3f μm/s', std(vtheta_valid))
+                sprintf('  Max: %.3f μm/s', max(vtheta_valid))
+                sprintf('  Min: %.3f μm/s', min(vtheta_valid))
+                ''
+                sprintf('Mask area: %.0f px²', areaMask(fr))
+                sprintf('Centroid: (%.1f, %.1f)', xc, yc)
+            };
+            text(0.1, 0.9, stats_text, 'Units', 'normalized', ...
+                'VerticalAlignment', 'top', 'FontSize', 10, 'FontName', 'FixedWidth');
+        end
+
+        sgtitle(sprintf('Tangential Flow Analysis - Frame %d', fr), 'FontSize', 14, 'FontWeight', 'bold');
+
+        exportgraphics(figSnap, fullfile(outDir_snapshots, sprintf('tangential_flow_analysis_fr%04d.png', fr)), ...
+            'Resolution', 200);
+        close(figSnap);
+    end
+
+    nSavedSnapshots = numel(1:snapshotEveryNFrames:nFrames);
+    fprintf('  - Saved %d tangential flow analysis plots to %s\n', nSavedSnapshots, outDir_snapshots);
+end
+
+fprintf('All visualizations complete!\n\n');
 
 save(fullfile(outDir,'tangential_kymo_results.mat'), ...
      'Vtheta_kymo','Npts_kymo','thetaCenters','thetaBinEdges','time_min', ...
@@ -192,27 +573,34 @@ fprintf('Saved outputs to: %s\n', outDir);
 %% ============================== FUNCTIONS =================================
 function [BW, stats, poly, RADIUS, xc, yc] = make_oocyte_mask_curvature(I, ...
     sigmaBlur, threshFrac, se, polyOrder, nBoundary, theta, ...
-    minAreaFrac, maxEccentric, minSolidity)
+    minAreaFrac, maxEccentric, minSolidity, centerHint)
 % Curvature-based oocyte boundary reconstruction (adapted from kymograph.m).
 % Methodology matches SCW_flows_curvature.m for strict physical encoding.
 %
 % Steps:
 % 1) Coarse threshold mask (darker oocyte on brighter background)
 % 2) Edge detection on coarse mask
-% 3) Circle fit to get center (xc, yc)
+% 3) Circle fit to get center (xc, yc) - optionally using centerHint
 % 4) Polar coordinate transformation r(theta) for edge points
 % 5) Polynomial fit of r(theta) with wrap-around handling (two passes)
 % 6) Curvature calculation from polar curve
 % 7) Reconstruct smooth boundary polygon
+%
+% centerHint (optional): [xc_prev, yc_prev] from previous frame for faster init
 
 [H, W] = size(I);
+
+% Handle optional centerHint parameter
+if nargin < 11 || isempty(centerHint)
+    centerHint = [W/2, H/2];  % default: image center
+end
 
 % Default outputs
 BW = false(size(I));
 stats = [];
 poly = [];
 RADIUS = nan(1, numel(theta)-1);
-xc = W/2; yc = H/2;
+xc = centerHint(1); yc = centerHint(2);  % Use hint as initial guess
 
 % 1) Coarse threshold mask
 Iblur = imgaussfilt(I, sigmaBlur);
@@ -419,30 +807,26 @@ if L < 50
     return;
 end
 
-% Periodic spline fit for smooth tangent calculation
-useCsape = exist('csape','file') == 2;
-if useCsape
-    ppx = csape(s, xb, 'periodic');
-    ppy = csape(s, yb, 'periodic');
-    dppx = fnder(ppx,1);
-    dppy = fnder(ppy,1);
-    sDense = linspace(0,L,nDenseSpline);
-    xDense = fnval(ppx, sDense);
-    yDense = fnval(ppy, sDense);
-    tx = fnval(dppx, sDense);
-    ty = fnval(dppy, sDense);
-else
-    % Fallback: periodic-like smoothing using wrapped indexing + spline interpolation
-    n0 = numel(xb);
-    xw = [xb; xb(2:end-1)];
-    yw = [yb; yb(2:end-1)];
-    sw = linspace(0,1,numel(xw))';
-    sDense = linspace(0,1,nDenseSpline);
-    xDense = interp1(sw, xw, sDense, 'spline');
-    yDense = interp1(sw, yw, sDense, 'spline');
-    % Tangent via numerical derivative (strict: ∂r/∂s)
-    tx = gradient(xDense);
-    ty = gradient(yDense);
+% Simple finite difference tangent calculation (centered differences)
+% Faster and doesn't require Curve Fitting Toolbox
+% Densely sample boundary using linear interpolation
+tSample = linspace(0, 1, nDenseSpline);
+xDense = interp1(linspace(0,1,numel(xb)), xb, tSample, 'linear');
+yDense = interp1(linspace(0,1,numel(yb)), yb, tSample, 'linear');
+
+nPts = numel(xDense);
+tx = zeros(nPts, 1);
+ty = zeros(nPts, 1);
+
+% Centered finite difference with periodic boundary conditions
+for i = 1:nPts
+    i_prev = mod(i-2, nPts) + 1;  % wrap around for i=1
+    i_next = mod(i, nPts) + 1;     % wrap around for i=nPts
+
+    % Tangent = (next_point - prev_point) / 2
+    % This approximates dr/ds using centered difference
+    tx(i) = (xDense(i_next) - xDense(i_prev)) / 2;
+    ty(i) = (yDense(i_next) - yDense(i_prev)) / 2;
 end
 
 % Normalize tangent to unit vector (strict physical encoding: t̂)
@@ -559,4 +943,19 @@ if ~iscell(Yc), Yc={Yc}; end
 % replicate X/Y if single but U/V multi-frame
 if numel(Xc)==1 && numel(Uc)>1, Xc = repmat(Xc, size(Uc)); end
 if numel(Yc)==1 && numel(Uc)>1, Yc = repmat(Yc, size(Uc)); end
+end
+
+function cmap = redblue(n)
+% REDBLUE  Diverging red-white-blue colormap for signed data
+% Blue (negative) -> White (zero) -> Red (positive)
+if nargin < 1, n = 256; end
+
+r = linspace(0, 1, n)';
+cmap = [r, 1-abs(2*r-1), 1-r];  % Simple red-white-blue
+
+% Alternative: use MATLAB's built-in if available
+if exist('brewermap', 'file')
+    cmap = brewermap(n, 'RdBu');
+    cmap = flipud(cmap);  % flip so red=positive
+end
 end
