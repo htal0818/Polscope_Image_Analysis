@@ -403,9 +403,20 @@ if makeQuiverOverlays
         % Create figure
         figQ = figure('Visible', 'off', 'Position', [100 100 800 800]);
         imshow(I, []); hold on; axis on;
+        colormap(gca, 'gray');  % Keep grayscale for image
 
-        % Plot boundary
-        plot(poly(:,1), poly(:,2), 'y-', 'LineWidth', 2);
+        % Plot boundary as THIN LINE (not filled)
+        plot(poly(:,1), poly(:,2), 'y-', 'LineWidth', 1.0);
+
+        % Compute actual radial distances from boundary polygon
+        % Interpolate boundary to match angular bins
+        nPolyPts = size(poly, 1);
+        theta_poly = atan2(poly(:,2) - yc, poly(:,1) - xc);
+        theta_poly = wrapTo2Pi(theta_poly);
+
+        % Sort by angle for proper interpolation
+        [theta_poly_sorted, sortIdx] = sort(theta_poly);
+        poly_sorted = poly(sortIdx, :);
 
         % Compute quiver positions and vectors
         thetaSubsample = 1:quiverSubsample:nThetaBins;
@@ -423,16 +434,11 @@ if makeQuiverOverlays
 
             if isnan(vtheta_k), continue; end
 
-            % Position on boundary (approximate using polar coordinates from center)
-            % Use mean radius for visualization
-            R_mean = mean(RADIUS_OF_CURVATURE(fr, :), 'omitnan');
-            if isnan(R_mean), R_mean = 100; end  % fallback
+            % Interpolate actual boundary position at this angle
+            xq(k) = interp1(theta_poly_sorted, poly_sorted(:,1), theta_k, 'linear', 'extrap');
+            yq(k) = interp1(theta_poly_sorted, poly_sorted(:,2), theta_k, 'linear', 'extrap');
 
-            xq(k) = xc + R_mean * cos(theta_k);
-            yq(k) = yc + R_mean * sin(theta_k);
-
-            % Tangent vector (perpendicular to radial direction)
-            % For counterclockwise tangent: rotate radial vector by 90 degrees
+            % Tangent vector (perpendicular to radial direction, CCW)
             tx = -sin(theta_k);  % tangent x component
             ty = cos(theta_k);   % tangent y component
 
@@ -445,22 +451,17 @@ if makeQuiverOverlays
         end
 
         % Remove NaN entries
-        valid = ~isnan(uq) & ~isnan(vq);
+        valid = ~isnan(uq) & ~isnan(vq) & ~isnan(xq) & ~isnan(yq);
         xq = xq(valid); yq = yq(valid);
         uq = uq(valid); vq = vq(valid);
 
-        % Plot quiver (no autoscale, we already scaled)
-        quiver(xq, yq, uq, vq, 0, 'Color', [0 1 0], 'LineWidth', 1.5, 'MaxHeadSize', 0.5);
+        % Plot quiver arrows (GREEN for visibility)
+        if ~isempty(xq)
+            quiver(xq, yq, uq, vq, 0, 'Color', [0 1 0], 'LineWidth', 1.2, 'MaxHeadSize', 0.8);
+        end
 
         title(sprintf('Frame %d: Tangential Flow Vectors (t=%.2f min)', fr, time_min(fr)), ...
             'FontSize', 12, 'Color', 'w');
-
-        % Add colorbar to show velocity scale
-        scatter([], [], [], 'Visible', 'off');  % dummy for colorbar
-        cb = colorbar;
-        colormap(gca, 'parula');
-        caxis([min(vtheta, [], 'omitnan'), max(vtheta, [], 'omitnan')]);
-        ylabel(cb, 'v_\theta (μm/s)', 'FontSize', 10, 'Color', 'w');
 
         exportgraphics(figQ, fullfile(outDir_quiver, sprintf('quiver_tangential_fr%04d.png', fr)), ...
             'Resolution', 200);
