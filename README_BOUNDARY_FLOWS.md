@@ -7,7 +7,7 @@
 ## Key Features
 
 - **Curvature-based boundary reconstruction**: Uses polar coordinate polynomial fitting with wrap-around handling for robust oocyte boundary detection
-- **Strict physical encoding**: All calculations use proper physical units (μm/s) and vector calculus
+- **Strict physical encoding**: All calculations use proper physical units (nm/s) and vector calculus
 - **Tangential flow extraction**: Computes tangential velocity component v·t̂ where t̂ is the unit tangent to the boundary
 - **Angular binning**: Organizes flow data by angular position θ around the oocyte centroid
 - **Smart caching**: Intelligent mask reusability with 5-10× speedup for slow deformations (easily disabled)
@@ -134,7 +134,7 @@ Kymographs are spatiotemporal maps showing how tangential velocity v_θ varies w
 
 #### Additional Elements
 - **White/black crosshair**: Oocyte centroid (center of polar coordinate system)
-- **Colorbar**: Shows velocity scale (μm/s) with CCW (red) and CW (blue) labels
+- **Colorbar**: Shows velocity scale (nm/s) with CCW (red) and CW (blue) labels
 - **Info box**: Displays cortical band parameters and max velocity for the frame
 
 **Biological interpretation**: This multi-layered visualization immediately shows:
@@ -172,7 +172,7 @@ snapshotEveryNFrames = 2;  % Save analysis every N frames
 
 **Panel 2: Tangential velocity profile v_θ(θ)**
 - **X-axis**: Angle (0-360 degrees)
-- **Y-axis**: Tangential velocity (μm/s)
+- **Y-axis**: Tangential velocity (nm/s)
 - **Plot style**: Blue dash-dot line with markers (.-) for clear visualization
 - **What to look for**:
   - **Peaks**: Regions of maximum flow speed (identify angular positions)
@@ -306,10 +306,10 @@ BW = poly2mask(x_boundary, y_boundary, H, W);
 ### 2. Tangential Flow Calculation (Strict Physical Encoding)
 
 #### Physical Units
-All velocities are converted to μm/s:
+All velocities are converted to nm/s:
 ```matlab
-U_μm/s = (U_px/frame / px_per_μm) / dt_sec
-V_μm/s = (V_px/frame / px_per_μm) / dt_sec
+U_nm/s = (U_px/frame / px_per_μm) / dt_sec
+V_nm/s = (V_px/frame / px_per_μm) / dt_sec
 ```
 
 #### Cortical Band Sampling
@@ -351,7 +351,7 @@ ty = cos(theta);   % y-component of unit tangent
 For each PIV vector **v** = (u, v) in the cortical band:
 
 ```
-v_tangential = v · t̂ = u·tx + v·ty   [μm/s]
+v_tangential = v · t̂ = u·tx + v·ty   [nm/s]
 ```
 
 This is the **strict physical encoding** of the tangential flow:
@@ -408,7 +408,7 @@ minSolidity = 0.85;   % Reject if solidity < 0.85
 ### Outputs
 
 #### MAT file: `tangential_kymo_results.mat`
-- `Vtheta_kymo` - [nFrames × nThetaBins] - Mean tangential velocity (μm/s) per angular bin
+- `Vtheta_kymo` - [nFrames × nThetaBins] - Mean tangential velocity (nm/s) per angular bin
 - `Npts_kymo` - [nFrames × nThetaBins] - Number of PIV points per bin
 - `RADIUS_OF_CURVATURE` - [nFrames × nThetaBins-1] - Radius of curvature (pixels) vs angle
 - `thetaCenters` - [1 × nThetaBins] - Angular bin centers (radians)
@@ -464,7 +464,7 @@ tangential_kymo_out/
 
 The tangential velocity field **v_θ(θ, t)** represents cortical flows parallel to the oocyte surface:
 
-- **Magnitude**: Speed of material transport along the cortex (μm/s)
+- **Magnitude**: Speed of material transport along the cortex (nm/s)
 - **Sign convention**:
   - **Positive**: Flow in counterclockwise direction (standard mathematical convention)
   - **Negative**: Flow in clockwise direction

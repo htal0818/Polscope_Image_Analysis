@@ -312,8 +312,8 @@ for fr = 1:nFrames
         fprintf('  ⚠ Frame %d: SPARSE BINS - only %d/%d bins have data (%.0f%%)\n', ...
             fr, binsWithData, nThetaBins, 100*binsWithData/nThetaBins);
     end
-    if vtheta_std < 0.01 && ~isempty(vtheta_valid)
-        fprintf('  ⚠ Frame %d: FLAT VTHETA - std=%.4f μm/s, range=%.4f μm/s (may appear uniform)\n', ...
+    if vtheta_std < 10 && ~isempty(vtheta_valid)
+        fprintf('  ⚠ Frame %d: FLAT VTHETA - std=%.4f nm/s, range=%.4f nm/s (may appear uniform)\n', ...
             fr, vtheta_std, vtheta_range);
     end
 
@@ -369,14 +369,14 @@ if ~isempty(vtheta_all_valid)
     globalMean = mean(vtheta_all_valid);
 
     fprintf('\nTest 3 - Vtheta Dynamic Range:\n');
-    fprintf('  Global: mean=%.4f, std=%.4f, range=%.4f μm/s\n', globalMean, globalStd, globalRange);
+    fprintf('  Global: mean=%.4f, std=%.4f, range=%.4f nm/s\n', globalMean, globalStd, globalRange);
 
     % Per-frame std
     perFrameStd = std(Vtheta_kymo, 0, 2, 'omitnan');
     avgPerFrameStd = mean(perFrameStd(qcFlag), 'omitnan');
-    fprintf('  Per-frame std: avg=%.4f μm/s\n', avgPerFrameStd);
+    fprintf('  Per-frame std: avg=%.4f nm/s\n', avgPerFrameStd);
 
-    if avgPerFrameStd < 0.01
+    if avgPerFrameStd < 10
         fprintf('  ⚠ WARNING: Very low per-frame variation. Possible causes:\n');
         fprintf('    - PIV vectors mostly radial (no tangential component)\n');
         fprintf('    - Centroid detection error causing wrong tangent directions\n');
@@ -412,10 +412,10 @@ imagesc(rad2deg(thetaCenters), time_min, Vtheta_kymo);
 axis tight;
 xlabel('Angle (degrees)', 'FontSize', 12);
 ylabel('Time (min)', 'FontSize', 12);
-title('Tangential Cortical Flow v_\theta(\theta,t) - Signed (μm/s)', 'FontSize', 14);
+title('Tangential Cortical Flow v_\theta(\theta,t) - Signed (nm/s)', 'FontSize', 14);
 colormap(gca, 'parula');
 cb = colorbar;
-ylabel(cb, 'v_\theta (μm/s)', 'FontSize', 11);
+ylabel(cb, 'v_\theta (nm/s)', 'FontSize', 11);
 set(gca, 'FontSize', 11);
 exportgraphics(fig1, fullfile(outDir_kymographs,'kymograph_vtheta_signed.png'), 'Resolution', 300);
 
@@ -426,10 +426,10 @@ if makeEnhancedKymographs
     axis tight;
     xlabel('Angle (degrees)', 'FontSize', 12);
     ylabel('Time (min)', 'FontSize', 12);
-    title('Tangential Flow Magnitude |v_\theta(\theta,t)| (μm/s)', 'FontSize', 14);
+    title('Tangential Flow Magnitude |v_\theta(\theta,t)| (nm/s)', 'FontSize', 14);
     colormap(gca, 'hot');
     cb = colorbar;
-    ylabel(cb, '|v_\theta| (μm/s)', 'FontSize', 11);
+    ylabel(cb, '|v_\theta| (nm/s)', 'FontSize', 11);
     set(gca, 'FontSize', 11);
     exportgraphics(fig2, fullfile(outDir_kymographs,'kymograph_vtheta_magnitude.png'), 'Resolution', 300);
 
@@ -439,7 +439,7 @@ if makeEnhancedKymographs
     axis tight;
     xlabel('Angle (degrees)', 'FontSize', 12);
     ylabel('Time (min)', 'FontSize', 12);
-    title('Tangential Flow Directionality (μm/s)', 'FontSize', 14);
+    title('Tangential Flow Directionality (nm/s)', 'FontSize', 14);
 
     % Diverging colormap: blue (negative/clockwise) to red (positive/counterclockwise)
     colormap(gca, redblue(256));
@@ -451,7 +451,7 @@ if makeEnhancedKymographs
     end
 
     cb = colorbar;
-    ylabel(cb, 'v_\theta (μm/s): red=CCW, blue=CW', 'FontSize', 10);
+    ylabel(cb, 'v_\theta (nm/s): red=CCW, blue=CW', 'FontSize', 10);
     set(gca, 'FontSize', 11);
     exportgraphics(fig3, fullfile(outDir_kymographs,'kymograph_vtheta_directional.png'), 'Resolution', 300);
 
@@ -611,7 +611,7 @@ if makeQuiverOverlays
             theta_k = thetaCenters(idx);
             vtheta_k = vtheta(idx);
 
-            if isnan(vtheta_k) || abs(vtheta_k) < 0.001, continue; end
+            if isnan(vtheta_k) || abs(vtheta_k) < 1, continue; end  % Skip if < 1 nm/s
 
             % Find nearest boundary point at this angle
             [~, nearest_idx] = min(abs(wrapTo2Pi(theta_poly) - wrapTo2Pi(theta_k)));
@@ -652,7 +652,7 @@ if makeQuiverOverlays
             linspace(-vmax_global, vmax_global, 256)');
         colormap(cb_ax, redblue(256));
         set(cb_ax, 'XTick', [], 'YAxisLocation', 'right', 'YDir', 'normal');
-        ylabel(cb_ax, 'v_\theta (μm/s)', 'FontSize', 11);
+        ylabel(cb_ax, 'v_\theta (nm/s)', 'FontSize', 11);
         title(cb_ax, 'CCW', 'FontSize', 9, 'Color', [0.8 0 0]);
 
         % Add CW label at bottom
@@ -661,7 +661,7 @@ if makeQuiverOverlays
 
         % Add info text
         annotation('textbox', [0.02 0.02 0.3 0.06], 'String', ...
-            sprintf('Band: %d-%d px | Max |v_\\theta|: %.2f μm/s', ...
+            sprintf('Band: %d-%d px | Max |v_\\theta|: %.2f nm/s', ...
             bandOuterPx, bandInnerPx, max(abs(vtheta), [], 'omitnan')), ...
             'EdgeColor', 'none', 'FontSize', 9, 'BackgroundColor', [1 1 1 0.7]);
 
@@ -703,7 +703,7 @@ if makeSnapshotPlots
         % Panel 2: Tangential velocity profile
         subplot(2,3,2);
         plot(rad2deg(thetaCenters), vtheta, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 8);
-        xlabel('Angle (degrees)'); ylabel('v_\theta (μm/s)');
+        xlabel('Angle (degrees)'); ylabel('v_\theta (nm/s)');
         title('Tangential Velocity Profile');
         grid on;
         xlim([0 360]);
@@ -741,11 +741,11 @@ if makeSnapshotPlots
                 sprintf('Time: %.2f min', time_min(fr))
                 ''
                 'Tangential Flow Statistics:'
-                sprintf('  Mean: %.3f μm/s', mean(vtheta_valid))
-                sprintf('  Median: %.3f μm/s', median(vtheta_valid))
-                sprintf('  Std: %.3f μm/s', std(vtheta_valid))
-                sprintf('  Max: %.3f μm/s', max(vtheta_valid))
-                sprintf('  Min: %.3f μm/s', min(vtheta_valid))
+                sprintf('  Mean: %.3f nm/s', mean(vtheta_valid))
+                sprintf('  Median: %.3f nm/s', median(vtheta_valid))
+                sprintf('  Std: %.3f nm/s', std(vtheta_valid))
+                sprintf('  Max: %.3f nm/s', max(vtheta_valid))
+                sprintf('  Min: %.3f nm/s', min(vtheta_valid))
                 ''
                 sprintf('Mask area: %.0f px²', areaMask(fr))
                 sprintf('Centroid: (%.1f, %.1f)', xc, yc)
@@ -981,8 +981,8 @@ function [vBins, nCount, dbg] = tangential_from_boundary_curvature( ...
 % - Tangential component: v_tangent = v · t̂ (dot product with unit tangent)
 % - Binned by angular position theta around oocyte centroid
 
-% Convert velocities to um/s (strict physical units)
-[U_um_s, V_um_s] = convertVelToUmPerSec(U, V, pivVelUnit, px_per_um, dt_sec);
+% Convert velocities to nm/s (strict physical units)
+[U_nm_s, V_nm_s] = convertVelToNmPerSec(U, V, pivVelUnit, px_per_um, dt_sec);
 
 % Use polygon boundary from curvature reconstruction
 if isempty(poly)
@@ -1064,7 +1064,7 @@ Xi = clamp(round(X), 1, size(D,2));
 Yi = clamp(round(Y), 1, size(D,1));
 lin = sub2ind(size(D), Yi, Xi);
 
-inside = BW(lin) & isfinite(U_um_s) & isfinite(V_um_s);
+inside = BW(lin) & isfinite(U_nm_s) & isfinite(V_nm_s);
 inBand = inside & (D(lin) >= bandOuterPx) & (D(lin) <= bandInnerPx);
 
 if ~any(inBand(:))
@@ -1075,7 +1075,7 @@ if ~any(inBand(:))
 end
 
 xq = X(inBand); yq = Y(inBand);
-uq = U_um_s(inBand); vq = V_um_s(inBand);
+uq = U_nm_s(inBand); vq = V_nm_s(inBand);
 
 % =========================================================================
 % PIV MAPPING: Assign angles to PIV points, use tangent at that angle
@@ -1094,7 +1094,7 @@ tqy = cos(theta_piv);
 
 % STRICT PHYSICAL ENCODING: tangential component = v · t̂
 % where v = (u, v) is velocity vector, t̂ = (tx, ty) is unit tangent
-vT = uq.*tqx + vq.*tqy;  % tangential velocity [um/s]
+vT = uq.*tqx + vq.*tqy;  % tangential velocity [nm/s]
 
 % Use PIV point angles for binning (consistent with tangent calculation)
 th = theta_piv;
@@ -1132,14 +1132,16 @@ function v = clamp(v, lo, hi)
 v = max(lo, min(hi, v));
 end
 
-function [U_um_s, V_um_s] = convertVelToUmPerSec(U, V, pivVelUnit, px_per_um, dt_sec)
+function [U_nm_s, V_nm_s] = convertVelToNmPerSec(U, V, pivVelUnit, px_per_um, dt_sec)
+% Convert PIV velocities to nm/s (nanometers per second)
+% 1 μm = 1000 nm
 switch lower(strtrim(pivVelUnit))
     case 'px_per_frame'
-        U_um_s = (U / px_per_um) / dt_sec;
-        V_um_s = (V / px_per_um) / dt_sec;
+        U_nm_s = (U / px_per_um) / dt_sec * 1000;  % nm/s * 1000 = nm/s
+        V_nm_s = (V / px_per_um) / dt_sec * 1000;
     case 'px_per_sec'
-        U_um_s = (U / px_per_um);
-        V_um_s = (V / px_per_um);
+        U_nm_s = (U / px_per_um) * 1000;
+        V_nm_s = (V / px_per_um) * 1000;
     otherwise
         error('Unknown pivVelUnit: %s', pivVelUnit);
 end
