@@ -586,6 +586,34 @@ end
 if makeSnapshotPlots
     fprintf('  - Generating flow analysis plots with vorticity (every %d frames)...\n', snapshotEveryNFrames);
 
+    % --- Compute GLOBAL axis limits for consistent scaling across all frames ---
+    % Tangential velocity limits (symmetric around zero)
+    vtheta_all = Vtheta_kymo(qcFlag, :);
+    vtheta_absmax = max(abs(vtheta_all(:)), [], 'omitnan');
+    if isnan(vtheta_absmax) || vtheta_absmax == 0, vtheta_absmax = 1; end
+    ylim_vtheta = [-vtheta_absmax, vtheta_absmax] * 1.1;  % 10% padding
+
+    % Vorticity limits (symmetric around zero)
+    vort_all = Vorticity_kymo(qcFlag, :);
+    vort_absmax = max(abs(vort_all(:)), [], 'omitnan');
+    if isnan(vort_absmax) || vort_absmax == 0, vort_absmax = 1; end
+    ylim_vort = [-vort_absmax, vort_absmax] * 1.1;  % 10% padding
+
+    % Curvature limits (positive values only)
+    curv_all = RADIUS_OF_CURVATURE(qcFlag, :);
+    curv_min = min(curv_all(:), [], 'omitnan');
+    curv_max = max(curv_all(:), [], 'omitnan');
+    if isnan(curv_min), curv_min = 0; end
+    if isnan(curv_max) || curv_max == 0, curv_max = 1; end
+    ylim_curv = [curv_min * 0.9, curv_max * 1.1];  % 10% padding
+
+    % Polar plot radial limits
+    rlim_vtheta = [0, vtheta_absmax * 1.1];
+    rlim_vort = [0, vort_absmax * 1.1];
+
+    fprintf('    Global axis limits: vtheta=[%.3f,%.3f], vort=[%.3f,%.3f], curv=[%.1f,%.1f]\n', ...
+        ylim_vtheta(1), ylim_vtheta(2), ylim_vort(1), ylim_vort(2), ylim_curv(1), ylim_curv(2));
+
     for fr = 1:snapshotEveryNFrames:nFrames
         if ~qcFlag(fr), continue; end
 
@@ -609,61 +637,74 @@ if makeSnapshotPlots
         plot(xc, yc, 'r+', 'MarkerSize', 12, 'LineWidth', 2);
         title(sprintf('Frame %d (t=%.2f min)', fr, time_min(fr)));
 
-        % Panel 2: Tangential velocity profile
+        % Panel 2: Tangential velocity profile (FIXED Y-AXIS)
         subplot(3,3,2);
         plot(1:nThetaBins, vtheta, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 6);
+        hold on;
+        yline(0, 'k--', 'LineWidth', 0.5);
         xlabel('Angular Bin'); ylabel('v_\theta (μm/s)');
         title('Tangential Velocity Profile');
         grid on;
         xlim([1 nThetaBins]);
+        ylim(ylim_vtheta);  % FIXED SCALE
 
-        % Panel 3: Vorticity profile (NEW)
+        % Panel 3: Vorticity profile (FIXED Y-AXIS)
         subplot(3,3,3);
         plot(1:nThetaBins, vort, 'm.-', 'LineWidth', 1.5, 'MarkerSize', 6);
         hold on;
-        yline(0, 'k--', 'LineWidth', 1);
+        yline(0, 'k--', 'LineWidth', 0.5);
         xlabel('Angular Bin'); ylabel('\omega (1/s)');
         title('Vorticity Profile (Fluid Rotation)');
         grid on;
         xlim([1 nThetaBins]);
+        ylim(ylim_vort);  % FIXED SCALE
 
-        % Panel 4: Curvature profile
+        % Panel 4: Curvature profile (FIXED Y-AXIS)
         subplot(3,3,4);
         plot(1:nThetaBins-1, radius_curv, 'r.-', 'LineWidth', 1.5, 'MarkerSize', 6);
         xlabel('Angular Bin'); ylabel('R_{curv} (px)');
         title('Boundary Curvature');
         grid on;
         xlim([1 nThetaBins-1]);
+        ylim(ylim_curv);  % FIXED SCALE
 
-        % Panel 5: Polar plot of tangential velocity
+        % Panel 5: Polar plot of tangential velocity (FIXED R-AXIS)
         subplot(3,3,5);
-        polarplot(thetaCenters, abs(vtheta), 'b-', 'LineWidth', 2);
+        vtheta_abs = abs(vtheta);
+        vtheta_abs(isnan(vtheta_abs)) = 0;  % Replace NaN for polar plot
+        polarplot(thetaCenters, vtheta_abs, 'b-', 'LineWidth', 2);
         title('|v_\theta| Magnitude (Polar)');
+        rlim(rlim_vtheta);  % FIXED SCALE
 
-        % Panel 6: Polar plot of vorticity magnitude (NEW)
+        % Panel 6: Polar plot of vorticity magnitude (FIXED R-AXIS)
         subplot(3,3,6);
         vort_abs = abs(vort);
         vort_abs(isnan(vort_abs)) = 0;  % Replace NaN for polar plot
         polarplot(thetaCenters, vort_abs, 'm-', 'LineWidth', 2);
         title('|ω| Vorticity (Polar)');
+        rlim(rlim_vort);  % FIXED SCALE
 
-        % Panel 7: Signed polar plot for v_theta
+        % Panel 7: Signed polar plot for v_theta (FIXED R-AXIS)
         subplot(3,3,7);
         pos_idx = vtheta >= 0;
         neg_idx = vtheta < 0;
-        polarplot(thetaCenters(pos_idx), vtheta(pos_idx), 'r.', 'MarkerSize', 8); hold on;
-        polarplot(thetaCenters(neg_idx), abs(vtheta(neg_idx)), 'b.', 'MarkerSize', 8);
+        vtheta_plot = vtheta; vtheta_plot(isnan(vtheta_plot)) = 0;
+        polarplot(thetaCenters(pos_idx), vtheta_plot(pos_idx), 'r.', 'MarkerSize', 8); hold on;
+        polarplot(thetaCenters(neg_idx), abs(vtheta_plot(neg_idx)), 'b.', 'MarkerSize', 8);
         title('v_\theta Directionality');
         legend({'CCW (+)', 'CW (-)'}, 'Location', 'northeast');
+        rlim(rlim_vtheta);  % FIXED SCALE
 
-        % Panel 8: Signed polar plot for vorticity (NEW)
+        % Panel 8: Signed polar plot for vorticity (FIXED R-AXIS)
         subplot(3,3,8);
         pos_vort = vort >= 0;
         neg_vort = vort < 0;
-        polarplot(thetaCenters(pos_vort), vort(pos_vort), 'r.', 'MarkerSize', 8); hold on;
-        polarplot(thetaCenters(neg_vort), abs(vort(neg_vort)), 'b.', 'MarkerSize', 8);
+        vort_plot = vort; vort_plot(isnan(vort_plot)) = 0;
+        polarplot(thetaCenters(pos_vort), vort_plot(pos_vort), 'r.', 'MarkerSize', 8); hold on;
+        polarplot(thetaCenters(neg_vort), abs(vort_plot(neg_vort)), 'b.', 'MarkerSize', 8);
         title('\omega Directionality');
         legend({'CCW (+)', 'CW (-)'}, 'Location', 'northeast');
+        rlim(rlim_vort);  % FIXED SCALE
 
         % Panel 9: Combined Statistics (expanded)
         subplot(3,3,9); axis off;
