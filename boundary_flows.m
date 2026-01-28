@@ -53,9 +53,10 @@ dt_sec    = 15;       % sec/frame
 pivVelUnit = 'px_per_frame';  % 'px_per_frame' or 'px_per_sec'
 
 % --- Cortical band definition (STRICT): pixels INSIDE boundary ---
-% Example: bandOuter=3, bandInner=12  => sample points 3–12 px inside cortex
-bandOuterPx = 3;
-bandInnerPx = 12;
+% Example: bandOuter=1, bandInner=20  => sample points 1–20 px inside cortex
+% Wider band captures more cortical flow signal
+bandOuterPx = 1;
+bandInnerPx = 20;
 
 % --- Curvature-based boundary parameters (from kymograph.m methodology) ---
 sigmaBlur       = 1.0;           % pre-blur (pixels); keep small to preserve edge
@@ -135,6 +136,13 @@ centroidXY  = nan(nFrames,2);
 areaMask    = nan(nFrames,1);
 qcFlag      = false(nFrames,1);           % true if frame passes QC
 RADIUS_OF_CURVATURE = nan(nFrames, numel(thetaCenters)-1);  % radius of curvature per theta bin
+
+% --- Vorticity storage (measures fluid rotation/circularity) ---
+% Vorticity: ω = ∂v/∂x - ∂u/∂y [1/s in physical units]
+% Positive = counterclockwise rotation, Negative = clockwise rotation
+Vorticity_kymo = nan(nFrames, nThetaBins);     % mean vorticity per theta bin (1/s)
+Vorticity_field = cell(nFrames, 1);             % full vorticity field per frame
+MeanVorticity = nan(nFrames, 1);                % global mean vorticity in cortical band
 
 % --- Cache variables (for smart mask reusability) ---
 cache_prevBW = [];           % Previous mask
@@ -316,6 +324,17 @@ for fr = 1:nFrames
         fprintf('  ⚠ Frame %d: FLAT VTHETA - std=%.4f nm/s, range=%.4f nm/s (may appear uniform)\n', ...
             fr, vtheta_std, vtheta_range);
     end
+    %% ----- Compute vorticity (fluid rotation/circularity) -----
+    % Vorticity ω = ∂v/∂x - ∂u/∂y measures local rotation of fluid elements
+    % Positive = CCW rotation, Negative = CW rotation
+    [vortBins, vortField, meanVort, dbgVort] = compute_vorticity_from_PIV( ...
+        X, Y, U, V, BW, [xc, yc], ...
+        bandOuterPx, bandInnerPx, nThetaBins, thetaBinEdges, ...
+        px_per_um, dt_sec, pivVelUnit);
+
+    Vorticity_kymo(fr, :) = vortBins;
+    Vorticity_field{fr} = vortField;
+    MeanVorticity(fr) = meanVort;
 
     %% ----- Store visualization data -----
     visPolySeq{fr} = poly;
@@ -460,13 +479,24 @@ end
 
 % --- 4) ENHANCED FLOW OVERLAYS (Color-coded boundary + cortical band heatmap) ---
 if makeQuiverOverlays
-    fprintf('  - Generating enhanced flow overlays (Option A + D)...\n');
+    fprintf('  - Generating flow overlays...\n');
 
     % Pre-compute global velocity range for consistent colormap across frames
     vmax_global = max(abs(Vtheta_kymo(:)), [], 'omitnan');
     if isnan(vmax_global) || vmax_global == 0
         vmax_global = 1;  % Fallback
     end
+    % Compute global velocity range for consistent colorbar across all frames
+    allVtheta = Vtheta_kymo(qcFlag, :);
+    vmin_global = min(allVtheta(:), [], 'omitnan');
+    vmax_global = max(allVtheta(:), [], 'omitnan');
+    vabs_max = max(abs([vmin_global, vmax_global]));
+
+    % Use symmetric color limits for diverging colormap
+    clim_quiver = [-vabs_max, vabs_max];
+
+    % Create diverging colormap (blue=CW/negative, white=zero, red=CCW/positive)
+    cmap_diverge = redblue(256);
 
     for fr = 1:quiverEveryNFrames:nFrames
         if ~qcFlag(fr), continue; end
@@ -674,9 +704,37 @@ if makeQuiverOverlays
         numel(1:quiverEveryNFrames:nFrames), outDir_quiver);
 end
 
-% --- 5) SNAPSHOT DETAILED VISUALIZATIONS (Tangential Flow Analysis) ---
+% --- 6) SNAPSHOT DETAILED VISUALIZATIONS (Tangential Flow + Vorticity Analysis) ---
 if makeSnapshotPlots
-    fprintf('  - Generating tangential flow analysis plots (every %d frames)...\n', snapshotEveryNFrames);
+    fprintf('  - Generating flow analysis plots with vorticity (every %d frames)...\n', snapshotEveryNFrames);
+
+    % --- Compute GLOBAL axis limits for consistent scaling across all frames ---
+    % Tangential velocity limits (symmetric around zero)
+    vtheta_all = Vtheta_kymo(qcFlag, :);
+    vtheta_absmax = max(abs(vtheta_all(:)), [], 'omitnan');
+    if isnan(vtheta_absmax) || vtheta_absmax == 0, vtheta_absmax = 1; end
+    ylim_vtheta = [-vtheta_absmax, vtheta_absmax] * 1.1;  % 10% padding
+
+    % Vorticity limits (symmetric around zero)
+    vort_all = Vorticity_kymo(qcFlag, :);
+    vort_absmax = max(abs(vort_all(:)), [], 'omitnan');
+    if isnan(vort_absmax) || vort_absmax == 0, vort_absmax = 1; end
+    ylim_vort = [-vort_absmax, vort_absmax] * 1.1;  % 10% padding
+
+    % Curvature limits (positive values only)
+    curv_all = RADIUS_OF_CURVATURE(qcFlag, :);
+    curv_min = min(curv_all(:), [], 'omitnan');
+    curv_max = max(curv_all(:), [], 'omitnan');
+    if isnan(curv_min), curv_min = 0; end
+    if isnan(curv_max) || curv_max == 0, curv_max = 1; end
+    ylim_curv = [curv_min * 0.9, curv_max * 1.1];  % 10% padding
+
+    % Polar plot radial limits
+    rlim_vtheta = [0, vtheta_absmax * 1.1];
+    rlim_vort = [0, vort_absmax * 1.1];
+
+    fprintf('    Global axis limits: vtheta=[%.3f,%.3f], vort=[%.3f,%.3f], curv=[%.1f,%.1f]\n', ...
+        ylim_vtheta(1), ylim_vtheta(2), ylim_vort(1), ylim_vort(2), ylim_curv(1), ylim_curv(2));
 
     for fr = 1:snapshotEveryNFrames:nFrames
         if ~qcFlag(fr), continue; end
@@ -689,12 +747,13 @@ if makeSnapshotPlots
         yc = centroidXY(fr, 2);
         vtheta = Vtheta_kymo(fr, :);
         radius_curv = RADIUS_OF_CURVATURE(fr, :);
+        vort = Vorticity_kymo(fr, :);  % Vorticity profile for this frame
 
-        % Create multi-panel figure
-        figSnap = figure('Position', [50 50 1400 800]);
+        % Create expanded multi-panel figure (3x3 for vorticity)
+        figSnap = figure('Position', [50 50 1600 1000]);
 
-        % Panel 1: Image with boundary and quiver
-        subplot(2,3,1);
+        % Panel 1: Image with boundary
+        subplot(3,3,1);
         imshow(I, []); hold on;
         plot(poly(:,1), poly(:,2), 'y-', 'LineWidth', 2);
         plot(xc, yc, 'r+', 'MarkerSize', 12, 'LineWidth', 2);
@@ -717,23 +776,46 @@ if makeSnapshotPlots
         grid on;
         xlim([0 360]);
 
-        % Panel 4: Polar plot of tangential velocity
-        subplot(2,3,4);
-        polarplot(thetaCenters, abs(vtheta), 'b-', 'LineWidth', 2);
+        % Panel 5: Polar plot of tangential velocity (FIXED R-AXIS)
+        subplot(3,3,5);
+        vtheta_abs = abs(vtheta);
+        vtheta_abs(isnan(vtheta_abs)) = 0;  % Replace NaN for polar plot
+        polarplot(thetaCenters, vtheta_abs, 'b-', 'LineWidth', 2);
         title('|v_\theta| Magnitude (Polar)');
+        rlim(rlim_vtheta);  % FIXED SCALE
 
-        % Panel 5: Signed polar plot
-        subplot(2,3,5);
-        % For signed polar plot, show as two colors
+        % Panel 6: Polar plot of vorticity magnitude (FIXED R-AXIS)
+        subplot(3,3,6);
+        vort_abs = abs(vort);
+        vort_abs(isnan(vort_abs)) = 0;  % Replace NaN for polar plot
+        polarplot(thetaCenters, vort_abs, 'm-', 'LineWidth', 2);
+        title('|ω| Vorticity (Polar)');
+        rlim(rlim_vort);  % FIXED SCALE
+
+        % Panel 7: Signed polar plot for v_theta (FIXED R-AXIS)
+        subplot(3,3,7);
         pos_idx = vtheta >= 0;
         neg_idx = vtheta < 0;
-        polarplot(thetaCenters(pos_idx), vtheta(pos_idx), 'r.', 'MarkerSize', 8); hold on;
-        polarplot(thetaCenters(neg_idx), abs(vtheta(neg_idx)), 'b.', 'MarkerSize', 8);
+        vtheta_plot = vtheta; vtheta_plot(isnan(vtheta_plot)) = 0;
+        polarplot(thetaCenters(pos_idx), vtheta_plot(pos_idx), 'r.', 'MarkerSize', 8); hold on;
+        polarplot(thetaCenters(neg_idx), abs(vtheta_plot(neg_idx)), 'b.', 'MarkerSize', 8);
         title('v_\theta Directionality');
-        legend({'CCW (+)', 'CW (-)'}, 'Location', 'northeast');  % Top right corner
+        legend({'CCW (+)', 'CW (-)'}, 'Location', 'northeast');
+        rlim(rlim_vtheta);  % FIXED SCALE
 
-        % Panel 6: Statistics
-        subplot(2,3,6); axis off;
+        % Panel 8: Signed polar plot for vorticity (FIXED R-AXIS)
+        subplot(3,3,8);
+        pos_vort = vort >= 0;
+        neg_vort = vort < 0;
+        vort_plot = vort; vort_plot(isnan(vort_plot)) = 0;
+        polarplot(thetaCenters(pos_vort), vort_plot(pos_vort), 'r.', 'MarkerSize', 8); hold on;
+        polarplot(thetaCenters(neg_vort), abs(vort_plot(neg_vort)), 'b.', 'MarkerSize', 8);
+        title('\omega Directionality');
+        legend({'CCW (+)', 'CW (-)'}, 'Location', 'northeast');
+        rlim(rlim_vort);  % FIXED SCALE
+
+        % Panel 9: Combined Statistics (expanded)
+        subplot(3,3,9); axis off;
         vtheta_valid = vtheta(~isnan(vtheta));
         if ~isempty(vtheta_valid)
             stats_text = {
@@ -762,7 +844,7 @@ if makeSnapshotPlots
     end
 
     nSavedSnapshots = numel(1:snapshotEveryNFrames:nFrames);
-    fprintf('  - Saved %d tangential flow analysis plots to %s\n', nSavedSnapshots, outDir_snapshots);
+    fprintf('  - Saved %d flow+vorticity analysis plots to %s\n', nSavedSnapshots, outDir_snapshots);
 end
 
 fprintf('All visualizations complete!\n\n');
@@ -770,9 +852,14 @@ fprintf('All visualizations complete!\n\n');
 save(fullfile(outDir,'tangential_kymo_results.mat'), ...
      'Vtheta_kymo','Npts_kymo','thetaCenters','thetaBinEdges','time_min', ...
      'centroidXY','areaMask','qcFlag','RADIUS_OF_CURVATURE', ...
+     'Vorticity_kymo','Vorticity_field','MeanVorticity', ...
      'px_per_um','dt_sec','bandOuterPx','bandInnerPx','pivMatFile','base_dir');
 
 fprintf('Saved outputs to: %s\n', outDir);
+fprintf('\nVorticity data included:\n');
+fprintf('  - Vorticity_kymo: Mean vorticity per theta bin (1/s)\n');
+fprintf('  - Vorticity_field: Full vorticity field per frame\n');
+fprintf('  - MeanVorticity: Global mean vorticity in cortical band (1/s)\n');
 
 
 %% ============================== FUNCTIONS =================================
@@ -1190,4 +1277,144 @@ if exist('brewermap', 'file')
     cmap = brewermap(n, 'RdBu');
     cmap = flipud(cmap);  % flip so red=positive
 end
+end
+
+function [vortBins, vortField, meanVort, dbgVort] = compute_vorticity_from_PIV( ...
+    X, Y, U, V, BW, centroid, bandOuterPx, bandInnerPx, nThetaBins, thetaBinEdges, ...
+    px_per_um, dt_sec, pivVelUnit)
+% COMPUTE_VORTICITY_FROM_PIV - Calculates vorticity field from PIV data
+%
+% Vorticity (2D): ω = ∂v/∂x - ∂u/∂y
+%   - Measures local rotation/circulation of the fluid
+%   - Positive ω = counterclockwise rotation (CCW)
+%   - Negative ω = clockwise rotation (CW)
+%   - Units: 1/s (inverse seconds) in physical coordinates
+%
+% This provides a complementary measure to tangential velocity:
+%   - Tangential velocity: net flow along boundary
+%   - Vorticity: local spinning/circulation of fluid elements
+%
+% INPUTS:
+%   X, Y       - PIV grid coordinates (pixels)
+%   U, V       - PIV velocity components (px/frame or px/s)
+%   BW         - Binary mask of oocyte
+%   centroid   - [xc, yc] center of oocyte
+%   bandOuterPx, bandInnerPx - cortical band limits (pixels from boundary)
+%   nThetaBins - number of angular bins
+%   thetaBinEdges - edges for angular binning
+%   px_per_um  - pixels per micron
+%   dt_sec     - time between frames (seconds)
+%   pivVelUnit - 'px_per_frame' or 'px_per_sec'
+%
+% OUTPUTS:
+%   vortBins   - Mean vorticity per theta bin [1/s]
+%   vortField  - Full vorticity field (same size as U, V)
+%   meanVort   - Global mean vorticity in cortical band [1/s]
+%   dbgVort    - Debug structure with intermediate values
+
+% Initialize outputs
+vortBins = nan(1, nThetaBins);
+vortField = nan(size(U));
+meanVort = NaN;
+dbgVort = struct('sampleX', [], 'sampleY', [], 'sampleVort', []);
+
+% Convert velocities to physical units (um/s)
+[U_um_s, V_um_s] = convertVelToUmPerSec(U, V, pivVelUnit, px_per_um, dt_sec);
+
+% Get grid spacing in physical units (um)
+% Assume uniform grid spacing from PIV
+if size(X, 2) > 1
+    dx_px = abs(X(1, 2) - X(1, 1));
+else
+    dx_px = 1;
+end
+if size(Y, 1) > 1
+    dy_px = abs(Y(2, 1) - Y(1, 1));
+else
+    dy_px = 1;
+end
+
+dx_um = dx_px / px_per_um;  % grid spacing in microns
+dy_um = dy_px / px_per_um;
+
+% Compute vorticity using centered finite differences
+% ω = ∂v/∂x - ∂u/∂y
+[nRows, nCols] = size(U_um_s);
+
+% ∂v/∂x (derivative of V with respect to X)
+dvdx = zeros(nRows, nCols);
+for i = 1:nRows
+    for j = 2:nCols-1
+        dvdx(i, j) = (V_um_s(i, j+1) - V_um_s(i, j-1)) / (2 * dx_um);
+    end
+    % Forward/backward difference at boundaries
+    if nCols >= 2
+        dvdx(i, 1) = (V_um_s(i, 2) - V_um_s(i, 1)) / dx_um;
+        dvdx(i, nCols) = (V_um_s(i, nCols) - V_um_s(i, nCols-1)) / dx_um;
+    end
+end
+
+% ∂u/∂y (derivative of U with respect to Y)
+dudy = zeros(nRows, nCols);
+for j = 1:nCols
+    for i = 2:nRows-1
+        dudy(i, j) = (U_um_s(i+1, j) - U_um_s(i-1, j)) / (2 * dy_um);
+    end
+    % Forward/backward difference at boundaries
+    if nRows >= 2
+        dudy(1, j) = (U_um_s(2, j) - U_um_s(1, j)) / dy_um;
+        dudy(nRows, j) = (U_um_s(nRows, j) - U_um_s(nRows-1, j)) / dy_um;
+    end
+end
+
+% Vorticity field: ω = ∂v/∂x - ∂u/∂y [1/s]
+vortField = dvdx - dudy;
+
+% Handle NaN propagation (where original velocities were NaN)
+nanMask = isnan(U_um_s) | isnan(V_um_s);
+vortField(nanMask) = NaN;
+
+% Sample vorticity within cortical band (same methodology as tangential velocity)
+per = bwperim(BW);
+D = bwdist(per);
+
+% Clamp indices for lookup
+Xi = clamp(round(X), 1, size(D, 2));
+Yi = clamp(round(Y), 1, size(D, 1));
+lin = sub2ind(size(D), Yi, Xi);
+
+inside = BW(lin) & isfinite(vortField);
+inBand = inside & (D(lin) >= bandOuterPx) & (D(lin) <= bandInnerPx);
+
+if ~any(inBand(:))
+    return;
+end
+
+% Extract samples within cortical band
+xq = X(inBand);
+yq = Y(inBand);
+vortq = vortField(inBand);
+
+dbgVort.sampleX = xq;
+dbgVort.sampleY = yq;
+dbgVort.sampleVort = vortq;
+
+% Compute theta coordinate for each sample point
+cx = centroid(1);
+cy = centroid(2);
+th = atan2(yq - cy, xq - cx);
+th = wrapTo2Pi(th);
+
+% Bin vorticity by theta (angular position)
+binIdx = discretize(th, thetaBinEdges);
+for k = 1:nThetaBins
+    m = (binIdx == k);
+    if any(m)
+        vortBins(k) = mean(vortq(m), 'omitnan');
+    end
+end
+
+% Global mean vorticity in cortical band
+meanVort = mean(vortq, 'omitnan');
+
 end
