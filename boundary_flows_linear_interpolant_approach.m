@@ -562,12 +562,13 @@ if makeSnapshotPlots
     if isnan(vort_absmax) || vort_absmax == 0, vort_absmax = 1; end
     ylim_vort = [-vort_absmax, vort_absmax] * 1.1;
 
-    curv_all = RADIUS_OF_CURVATURE(qcFlag, :);
-    curv_min = min(curv_all(:), [], 'omitnan');
-    curv_max = max(curv_all(:), [], 'omitnan');
-    if isnan(curv_min), curv_min = 0; end
-    if isnan(curv_max) || curv_max == 0, curv_max = 1; end
-    ylim_curv = [curv_min * 0.9, curv_max * 1.1];
+    % Curvature in um (convert from px)
+    curv_all_um = RADIUS_OF_CURVATURE(qcFlag, :) / px_per_um;
+    curv_min_um = min(curv_all_um(:), [], 'omitnan');
+    curv_max_um = max(curv_all_um(:), [], 'omitnan');
+    if isnan(curv_min_um), curv_min_um = 0; end
+    if isnan(curv_max_um) || curv_max_um == 0, curv_max_um = 1; end
+    ylim_curv_um = [curv_min_um * 0.9, curv_max_um * 1.1];
 
     for fr = 1:snapshotEveryNFrames:nFrames
         if ~qcFlag(fr), continue; end
@@ -579,103 +580,69 @@ if makeSnapshotPlots
         xc = centroidXY(fr, 1);
         yc = centroidXY(fr, 2);
         vtheta_nm = Vtheta_kymo_nm(fr, :);
-        vtheta_raw_nm = Vtheta_raw(fr, :) * 1000;  % Convert to nm/s
-        radius_curv = RADIUS_OF_CURVATURE(fr, :);
+        radius_curv_um = RADIUS_OF_CURVATURE(fr, :) / px_per_um;  % Convert to um
         vort = Vorticity_kymo(fr, :);
 
-        figSnap = figure('Visible', 'off', 'Position', [50 50 1600 1000]);
+        % Compute mask radius in um from area
+        mask_radius_um = sqrt(areaMask(fr) / pi) / px_per_um;
+
+        figSnap = figure('Visible', 'off', 'Position', [50 50 1400 900]);
 
         % Panel 1: Image with boundary
-        subplot(3,3,1);
+        subplot(2,3,1);
         imshow(I, []); hold on;
         plot(poly(:,1), poly(:,2), 'y-', 'LineWidth', 2);
         plot(xc, yc, 'r+', 'MarkerSize', 12, 'LineWidth', 2);
         title(sprintf('Frame %d (t=%.2f min)', fr, time_min(fr)));
 
-        % Panel 2: RAW tangential velocity (500 pts - key difference!)
-        subplot(3,3,2);
-        plot(1:nBoundary, vtheta_raw_nm, 'b-', 'LineWidth', 1);
-        hold on; yline(0, 'k--', 'LineWidth', 0.5);
-        xlabel('Boundary Point'); ylabel('v_\theta (nm/s)');
-        title('RAW Tangential (500 pts, analytical)');
-        grid on; xlim([1 nBoundary]); ylim(ylim_vtheta);
-
-        % Panel 3: Binned tangential velocity
-        subplot(3,3,3);
-        plot(1:nThetaBins, vtheta_nm, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 6);
+        % Panel 2: Binned tangential velocity (nm/s)
+        subplot(2,3,2);
+        plot(1:nThetaBins, vtheta_nm, 'b-', 'LineWidth', 1.5);
         hold on; yline(0, 'k--', 'LineWidth', 0.5);
         xlabel('Angular Bin'); ylabel('v_\theta (nm/s)');
-        title('Binned Tangential Velocity');
+        title('Tangential Velocity');
         grid on; xlim([1 nThetaBins]); ylim(ylim_vtheta);
 
-        % Panel 4: Curvature
-        subplot(3,3,4);
-        plot(1:nThetaBins-1, radius_curv, 'r.-', 'LineWidth', 1.5, 'MarkerSize', 6);
-        xlabel('Angular Bin'); ylabel('R_{curv} (px)');
+        % Panel 3: Curvature (um)
+        subplot(2,3,3);
+        plot(1:nThetaBins-1, radius_curv_um, 'r-', 'LineWidth', 1.5);
+        xlabel('Angular Bin'); ylabel('R_{curv} (\mum)');
         title('Boundary Curvature');
-        grid on; xlim([1 nThetaBins-1]); ylim(ylim_curv);
+        grid on; xlim([1 nThetaBins-1]); ylim(ylim_curv_um);
 
-        % Panel 5: Vorticity
-        subplot(3,3,5);
-        plot(1:nThetaBins, vort, 'm.-', 'LineWidth', 1.5, 'MarkerSize', 6);
+        % Panel 4: Vorticity (1/s)
+        subplot(2,3,4);
+        plot(1:nThetaBins, vort, 'm-', 'LineWidth', 1.5);
         hold on; yline(0, 'k--', 'LineWidth', 0.5);
         xlabel('Angular Bin'); ylabel('\omega (1/s)');
         title('Vorticity Profile');
         grid on; xlim([1 nThetaBins]); ylim(ylim_vort);
 
-        % Panel 6: Polar magnitude
-        subplot(3,3,6);
+        % Panel 5: Polar magnitude (nm/s)
+        subplot(2,3,5);
         vtheta_abs_nm = abs(vtheta_nm);
         vtheta_abs_nm(isnan(vtheta_abs_nm)) = 0;
         polarplot(thetaCenters, vtheta_abs_nm, 'b-', 'LineWidth', 2);
         title('|v_\theta| Polar (nm/s)');
         rlim([0, vtheta_absmax_nm * 1.1]);
 
-        % Panel 7: Polar directionality
-        subplot(3,3,7);
-        pos_idx = vtheta_nm >= 0;
-        neg_idx = vtheta_nm < 0;
-        vtheta_plot_nm = vtheta_nm; vtheta_plot_nm(isnan(vtheta_plot_nm)) = 0;
-        polarplot(thetaCenters(pos_idx), vtheta_plot_nm(pos_idx), 'r.', 'MarkerSize', 8); hold on;
-        polarplot(thetaCenters(neg_idx), abs(vtheta_plot_nm(neg_idx)), 'b.', 'MarkerSize', 8);
-        title('v_\theta Direction (nm/s)');
-        legend({'CCW (+)', 'CW (-)'}, 'Location', 'northeast');
-        rlim([0, vtheta_absmax_nm * 1.1]);
-
-        % Panel 8: Raw vs Binned comparison
-        subplot(3,3,8);
-        theta_raw_fr = Theta_raw(fr, :);
-        scatter(theta_raw_fr, vtheta_raw_nm, 10, 'b', 'filled', 'MarkerFaceAlpha', 0.5);
-        hold on;
-        plot(thetaCenters, vtheta_nm, 'r-', 'LineWidth', 2);
-        xlabel('\theta (rad)'); ylabel('v_\theta (nm/s)');
-        title('Raw (blue) vs Binned (red)');
-        xlim([0, 2*pi]); ylim(ylim_vtheta);
-        legend({'Raw 500pt', 'Binned'}, 'Location', 'best');
-
-        % Panel 9: Statistics
-        subplot(3,3,9); axis off;
+        % Panel 6: Statistics
+        subplot(2,3,6); axis off;
         vtheta_valid_nm = vtheta_nm(~isnan(vtheta_nm));
-        vtheta_raw_valid_nm = vtheta_raw_nm(~isnan(vtheta_raw_nm));
 
         stats_text = {
-            sprintf('Frame: %d | Time: %.2f min', fr, time_min(fr))
+            sprintf('Frame: %d', fr)
+            sprintf('Time: %.2f min', time_min(fr))
             ''
-            'LINEAR INTERPOLANT APPROACH:'
-            sprintf('  Raw points: %d', sum(~isnan(vtheta_raw_nm)))
-            sprintf('  Raw mean: %.2f nm/s', mean(vtheta_raw_valid_nm))
-            sprintf('  Raw std:  %.2f nm/s', std(vtheta_raw_valid_nm))
+            sprintf('v_\\theta mean: %.2f nm/s', mean(vtheta_valid_nm))
+            sprintf('v_\\theta std:  %.2f nm/s', std(vtheta_valid_nm))
             ''
-            'BINNED (for comparison):'
-            sprintf('  Binned mean: %.2f nm/s', mean(vtheta_valid_nm))
-            sprintf('  Binned std:  %.2f nm/s', std(vtheta_valid_nm))
-            ''
+            sprintf('Mask radius: %.1f \\mum', mask_radius_um)
             sprintf('Normal offset: %d px', normalOffsetPx)
-            sprintf('Mask area: %.0f px^2', areaMask(fr))
         };
 
-        text(0.05, 0.95, stats_text, 'Units', 'normalized', ...
-            'VerticalAlignment', 'top', 'FontSize', 9, 'FontName', 'FixedWidth');
+        text(0.1, 0.9, stats_text, 'Units', 'normalized', ...
+            'VerticalAlignment', 'top', 'FontSize', 10, 'FontName', 'FixedWidth');
 
         sgtitle(sprintf('Linear Interpolant Analysis - Frame %d', fr), 'FontSize', 14, 'FontWeight', 'bold');
 
