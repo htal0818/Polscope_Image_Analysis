@@ -333,71 +333,79 @@ time_min = (0:nFrames-1) * (dt_sec/60);
 
 fprintf('Generating visualizations...\n');
 
+% --- Convert to nm/s for display (1 um/s = 1000 nm/s) ---
+Vtheta_raw_nm = Vtheta_raw * 1000;
+Vtheta_kymo_nm = Vtheta_kymo * 1000;
+
 % --- 1) RAW TANGENTIAL VELOCITY (500 points, no binning) ---
-fig0 = figure('Position', [100 100 1200 600]);
+fig0 = figure('Visible', 'off', 'Position', [100 100 1200 600]);
 subplot(1,2,1);
-imagesc(1:nBoundary, time_min, Vtheta_raw);
+imagesc(1:nBoundary, time_min, Vtheta_raw_nm);
 axis tight;
 xlabel('Boundary Point Index', 'FontSize', 12);
 ylabel('Time (min)', 'FontSize', 12);
 title('Raw Tangential Velocity (500 pts, analytical tangents)', 'FontSize', 12);
 colormap(gca, redblue(256));
-vmax = max(abs(Vtheta_raw(:)), [], 'omitnan');
+vmax = max(abs(Vtheta_raw_nm(:)), [], 'omitnan');
 if ~isnan(vmax) && vmax > 0; clim([-vmax, vmax]); end
-cb = colorbar; ylabel(cb, 'v_\theta (\mum/s)', 'FontSize', 11);
+cb = colorbar; ylabel(cb, 'v_\theta (nm/s)', 'FontSize', 11);
 
 subplot(1,2,2);
-imagesc(1:nThetaBins, time_min, Vtheta_kymo);
+imagesc(1:nThetaBins, time_min, Vtheta_kymo_nm);
 axis tight;
 xlabel('Angular Bin', 'FontSize', 12);
 ylabel('Time (min)', 'FontSize', 12);
 title('Binned Tangential Velocity (for comparison)', 'FontSize', 12);
 colormap(gca, redblue(256));
 if ~isnan(vmax) && vmax > 0; clim([-vmax, vmax]); end
-cb = colorbar; ylabel(cb, 'v_\theta (\mum/s)', 'FontSize', 11);
+cb = colorbar; ylabel(cb, 'v_\theta (nm/s)', 'FontSize', 11);
 
 sgtitle('LINEAR INTERPOLANT APPROACH: Raw vs Binned', 'FontSize', 14, 'FontWeight', 'bold');
 exportgraphics(fig0, fullfile(outDir_kymographs,'kymograph_raw_vs_binned.png'), 'Resolution', 300);
+close(fig0);
 
 % --- 2) BASIC SIGNED KYMOGRAPH ---
-fig1 = figure('Position', [100 100 1000 600]);
-imagesc(1:nThetaBins, time_min, Vtheta_kymo);
+fig1 = figure('Visible', 'off', 'Position', [100 100 1000 600]);
+imagesc(1:nThetaBins, time_min, Vtheta_kymo_nm);
 axis tight;
 xlabel('Angular Bin Number', 'FontSize', 12);
 ylabel('Time (min)', 'FontSize', 12);
 title('Tangential Cortical Flow v_\theta(\theta,t) - Linear Interpolant Approach', 'FontSize', 14);
 colormap(gca, 'parula');
 cb = colorbar;
-ylabel(cb, 'v_\theta (\mum/s)', 'FontSize', 11);
+ylabel(cb, 'v_\theta (nm/s)', 'FontSize', 11);
 set(gca, 'FontSize', 11);
 exportgraphics(fig1, fullfile(outDir_kymographs,'kymograph_vtheta_signed.png'), 'Resolution', 300);
+close(fig1);
 
 if makeEnhancedKymographs
     % --- 3) MAGNITUDE KYMOGRAPH ---
-    fig2 = figure('Position', [100 100 1000 600]);
-    imagesc(1:nThetaBins, time_min, abs(Vtheta_kymo));
+    fig2 = figure('Visible', 'off', 'Position', [100 100 1000 600]);
+    imagesc(1:nThetaBins, time_min, abs(Vtheta_kymo_nm));
     axis tight;
     xlabel('Angular Bin Number', 'FontSize', 12);
     ylabel('Time (min)', 'FontSize', 12);
     title('Tangential Flow Magnitude |v_\theta| - Linear Interpolant', 'FontSize', 14);
     colormap(gca, 'hot');
     cb = colorbar;
-    ylabel(cb, '|v_\theta| (\mum/s)', 'FontSize', 11);
+    ylabel(cb, '|v_\theta| (nm/s)', 'FontSize', 11);
     exportgraphics(fig2, fullfile(outDir_kymographs,'kymograph_vtheta_magnitude.png'), 'Resolution', 300);
+    close(fig2);
 
     % --- 4) DIRECTIONAL KYMOGRAPH ---
-    fig3 = figure('Position', [100 100 1000 600]);
-    imagesc(1:nThetaBins, time_min, Vtheta_kymo);
+    fig3 = figure('Visible', 'off', 'Position', [100 100 1000 600]);
+    imagesc(1:nThetaBins, time_min, Vtheta_kymo_nm);
     axis tight;
     xlabel('Angular Bin Number', 'FontSize', 12);
     ylabel('Time (min)', 'FontSize', 12);
     title('Tangential Flow Directionality - Linear Interpolant', 'FontSize', 14);
     colormap(gca, redblue(256));
-    vmax = max(abs(Vtheta_kymo(:)), [], 'omitnan');
-    if ~isnan(vmax) && vmax > 0; clim([-vmax, vmax]); end
+    vmax_dir = max(abs(Vtheta_kymo_nm(:)), [], 'omitnan');
+    if ~isnan(vmax_dir) && vmax_dir > 0; clim([-vmax_dir, vmax_dir]); end
     cb = colorbar;
-    ylabel(cb, 'v_\theta: red=CCW, blue=CW', 'FontSize', 10);
+    ylabel(cb, 'v_\theta (nm/s): red=CCW, blue=CW', 'FontSize', 10);
     exportgraphics(fig3, fullfile(outDir_kymographs,'kymograph_vtheta_directional.png'), 'Resolution', 300);
+    close(fig3);
 
     fprintf('  - Saved enhanced kymographs\n');
 end
@@ -405,7 +413,7 @@ end
 % --- VORTICITY KYMOGRAPHS ---
 fprintf('  - Generating vorticity kymographs...\n');
 
-fig4a = figure('Position', [100 100 1000 600]);
+fig4a = figure('Visible', 'off', 'Position', [100 100 1000 600]);
 imagesc(1:nThetaBins, time_min, Vorticity_kymo);
 axis tight;
 xlabel('Angular Bin Number', 'FontSize', 12);
@@ -417,8 +425,9 @@ if ~isnan(vort_max) && vort_max > 0; clim([-vort_max, vort_max]); end
 cb = colorbar;
 ylabel(cb, '\omega (1/s): red=CCW, blue=CW', 'FontSize', 10);
 exportgraphics(fig4a, fullfile(outDir_kymographs,'kymograph_vorticity_signed.png'), 'Resolution', 300);
+close(fig4a);
 
-fig4b = figure('Position', [100 100 1000 600]);
+fig4b = figure('Visible', 'off', 'Position', [100 100 1000 600]);
 imagesc(1:nThetaBins, time_min, abs(Vorticity_kymo));
 axis tight;
 xlabel('Angular Bin Number', 'FontSize', 12);
@@ -428,8 +437,9 @@ colormap(gca, 'hot');
 cb = colorbar;
 ylabel(cb, '|\omega| (1/s)', 'FontSize', 11);
 exportgraphics(fig4b, fullfile(outDir_kymographs,'kymograph_vorticity_magnitude.png'), 'Resolution', 300);
+close(fig4b);
 
-fig4c = figure('Position', [100 100 800 400]);
+fig4c = figure('Visible', 'off', 'Position', [100 100 800 400]);
 plot(time_min, MeanVorticity, 'b-', 'LineWidth', 1.5);
 hold on; yline(0, 'k--', 'LineWidth', 1);
 xlabel('Time (min)', 'FontSize', 12);
@@ -437,6 +447,7 @@ ylabel('Mean Vorticity \omega (1/s)', 'FontSize', 12);
 title('Global Cortical Vorticity vs Time', 'FontSize', 14);
 grid on;
 exportgraphics(fig4c, fullfile(outDir_kymographs,'vorticity_timeseries.png'), 'Resolution', 300);
+close(fig4c);
 
 fprintf('  - Saved vorticity kymographs\n');
 
@@ -444,9 +455,9 @@ fprintf('  - Saved vorticity kymographs\n');
 if makeQuiverOverlays
     fprintf('  - Generating quiver overlays...\n');
 
-    allVtheta = Vtheta_kymo(qcFlag, :);
-    vabs_max = max(abs(allVtheta(:)), [], 'omitnan');
-    clim_quiver = [-vabs_max, vabs_max];
+    allVtheta_nm = Vtheta_kymo_nm(qcFlag, :);
+    vabs_max_nm = max(abs(allVtheta_nm(:)), [], 'omitnan');
+    clim_quiver = [-vabs_max_nm, vabs_max_nm];
     cmap_diverge = redblue(256);
 
     for fr = 1:quiverEveryNFrames:nFrames
@@ -458,7 +469,7 @@ if makeQuiverOverlays
 
         xc = centroidXY(fr, 1);
         yc = centroidXY(fr, 2);
-        vtheta = Vtheta_kymo(fr, :);
+        vtheta_nm = Vtheta_kymo_nm(fr, :);
 
         figQ = figure('Visible', 'off', 'Position', [100 100 900 800]);
         imshow(I, []); hold on; axis on;
@@ -476,9 +487,9 @@ if makeQuiverOverlays
         for k = 1:nQuiver
             idx = thetaSubsample(k);
             theta_k = thetaCenters(idx);
-            vtheta_k = vtheta(idx);
+            vtheta_k_nm = vtheta_nm(idx);
 
-            if isnan(vtheta_k)
+            if isnan(vtheta_k_nm)
                 vq_color(k) = NaN;
                 continue;
             end
@@ -493,15 +504,15 @@ if makeQuiverOverlays
             tx_k = -sin(theta_k);
             ty_k = cos(theta_k);
 
-            arrow_scale = quiverScale * abs(vtheta_k) / px_per_um;
-            if vtheta_k < 0
+            arrow_scale = quiverScale * abs(vtheta_k_nm) / (px_per_um * 1000);  % nm/s to display
+            if vtheta_k_nm < 0
                 tx_k = -tx_k;
                 ty_k = -ty_k;
             end
 
             uq(k) = arrow_scale * tx_k;
             vq(k) = arrow_scale * ty_k;
-            vq_color(k) = vtheta_k;
+            vq_color(k) = vtheta_k_nm;
         end
 
         valid = ~isnan(vq_color) & (xq ~= 0 | yq ~= 0);
@@ -524,7 +535,7 @@ if makeQuiverOverlays
         caxis(clim_quiver);
 
         cb = colorbar;
-        ylabel(cb, 'v_\theta (\mum/s)', 'FontSize', 10, 'Color', 'w');
+        ylabel(cb, 'v_\theta (nm/s)', 'FontSize', 10, 'Color', 'w');
         set(cb, 'Color', 'w');
 
         title(sprintf('Frame %d: Tangential Flow (Linear Interp)', fr), 'FontSize', 12, 'Color', 'w');
@@ -540,11 +551,11 @@ end
 if makeSnapshotPlots
     fprintf('  - Generating snapshot plots...\n');
 
-    % Compute global axis limits
-    vtheta_all = Vtheta_kymo(qcFlag, :);
-    vtheta_absmax = max(abs(vtheta_all(:)), [], 'omitnan');
-    if isnan(vtheta_absmax) || vtheta_absmax == 0, vtheta_absmax = 1; end
-    ylim_vtheta = [-vtheta_absmax, vtheta_absmax] * 1.1;
+    % Compute global axis limits (in nm/s)
+    vtheta_all_nm = Vtheta_kymo_nm(qcFlag, :);
+    vtheta_absmax_nm = max(abs(vtheta_all_nm(:)), [], 'omitnan');
+    if isnan(vtheta_absmax_nm) || vtheta_absmax_nm == 0, vtheta_absmax_nm = 1; end
+    ylim_vtheta = [-vtheta_absmax_nm, vtheta_absmax_nm] * 1.1;
 
     vort_all = Vorticity_kymo(qcFlag, :);
     vort_absmax = max(abs(vort_all(:)), [], 'omitnan');
@@ -567,12 +578,12 @@ if makeSnapshotPlots
 
         xc = centroidXY(fr, 1);
         yc = centroidXY(fr, 2);
-        vtheta = Vtheta_kymo(fr, :);
-        vtheta_raw = Vtheta_raw(fr, :);
+        vtheta_nm = Vtheta_kymo_nm(fr, :);
+        vtheta_raw_nm = Vtheta_raw(fr, :) * 1000;  % Convert to nm/s
         radius_curv = RADIUS_OF_CURVATURE(fr, :);
         vort = Vorticity_kymo(fr, :);
 
-        figSnap = figure('Position', [50 50 1600 1000]);
+        figSnap = figure('Visible', 'off', 'Position', [50 50 1600 1000]);
 
         % Panel 1: Image with boundary
         subplot(3,3,1);
@@ -583,17 +594,17 @@ if makeSnapshotPlots
 
         % Panel 2: RAW tangential velocity (500 pts - key difference!)
         subplot(3,3,2);
-        plot(1:nBoundary, vtheta_raw, 'b-', 'LineWidth', 1);
+        plot(1:nBoundary, vtheta_raw_nm, 'b-', 'LineWidth', 1);
         hold on; yline(0, 'k--', 'LineWidth', 0.5);
-        xlabel('Boundary Point'); ylabel('v_\theta (\mum/s)');
+        xlabel('Boundary Point'); ylabel('v_\theta (nm/s)');
         title('RAW Tangential (500 pts, analytical)');
         grid on; xlim([1 nBoundary]); ylim(ylim_vtheta);
 
         % Panel 3: Binned tangential velocity
         subplot(3,3,3);
-        plot(1:nThetaBins, vtheta, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 6);
+        plot(1:nThetaBins, vtheta_nm, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 6);
         hold on; yline(0, 'k--', 'LineWidth', 0.5);
-        xlabel('Angular Bin'); ylabel('v_\theta (\mum/s)');
+        xlabel('Angular Bin'); ylabel('v_\theta (nm/s)');
         title('Binned Tangential Velocity');
         grid on; xlim([1 nThetaBins]); ylim(ylim_vtheta);
 
@@ -614,50 +625,50 @@ if makeSnapshotPlots
 
         % Panel 6: Polar magnitude
         subplot(3,3,6);
-        vtheta_abs = abs(vtheta);
-        vtheta_abs(isnan(vtheta_abs)) = 0;
-        polarplot(thetaCenters, vtheta_abs, 'b-', 'LineWidth', 2);
-        title('|v_\theta| Polar');
-        rlim([0, vtheta_absmax * 1.1]);
+        vtheta_abs_nm = abs(vtheta_nm);
+        vtheta_abs_nm(isnan(vtheta_abs_nm)) = 0;
+        polarplot(thetaCenters, vtheta_abs_nm, 'b-', 'LineWidth', 2);
+        title('|v_\theta| Polar (nm/s)');
+        rlim([0, vtheta_absmax_nm * 1.1]);
 
         % Panel 7: Polar directionality
         subplot(3,3,7);
-        pos_idx = vtheta >= 0;
-        neg_idx = vtheta < 0;
-        vtheta_plot = vtheta; vtheta_plot(isnan(vtheta_plot)) = 0;
-        polarplot(thetaCenters(pos_idx), vtheta_plot(pos_idx), 'r.', 'MarkerSize', 8); hold on;
-        polarplot(thetaCenters(neg_idx), abs(vtheta_plot(neg_idx)), 'b.', 'MarkerSize', 8);
-        title('v_\theta Direction');
+        pos_idx = vtheta_nm >= 0;
+        neg_idx = vtheta_nm < 0;
+        vtheta_plot_nm = vtheta_nm; vtheta_plot_nm(isnan(vtheta_plot_nm)) = 0;
+        polarplot(thetaCenters(pos_idx), vtheta_plot_nm(pos_idx), 'r.', 'MarkerSize', 8); hold on;
+        polarplot(thetaCenters(neg_idx), abs(vtheta_plot_nm(neg_idx)), 'b.', 'MarkerSize', 8);
+        title('v_\theta Direction (nm/s)');
         legend({'CCW (+)', 'CW (-)'}, 'Location', 'northeast');
-        rlim([0, vtheta_absmax * 1.1]);
+        rlim([0, vtheta_absmax_nm * 1.1]);
 
         % Panel 8: Raw vs Binned comparison
         subplot(3,3,8);
         theta_raw_fr = Theta_raw(fr, :);
-        scatter(theta_raw_fr, vtheta_raw, 10, 'b', 'filled', 'MarkerFaceAlpha', 0.5);
+        scatter(theta_raw_fr, vtheta_raw_nm, 10, 'b', 'filled', 'MarkerFaceAlpha', 0.5);
         hold on;
-        plot(thetaCenters, vtheta, 'r-', 'LineWidth', 2);
-        xlabel('\theta (rad)'); ylabel('v_\theta (\mum/s)');
+        plot(thetaCenters, vtheta_nm, 'r-', 'LineWidth', 2);
+        xlabel('\theta (rad)'); ylabel('v_\theta (nm/s)');
         title('Raw (blue) vs Binned (red)');
         xlim([0, 2*pi]); ylim(ylim_vtheta);
         legend({'Raw 500pt', 'Binned'}, 'Location', 'best');
 
         % Panel 9: Statistics
         subplot(3,3,9); axis off;
-        vtheta_valid = vtheta(~isnan(vtheta));
-        vtheta_raw_valid = vtheta_raw(~isnan(vtheta_raw));
+        vtheta_valid_nm = vtheta_nm(~isnan(vtheta_nm));
+        vtheta_raw_valid_nm = vtheta_raw_nm(~isnan(vtheta_raw_nm));
 
         stats_text = {
             sprintf('Frame: %d | Time: %.2f min', fr, time_min(fr))
             ''
             'LINEAR INTERPOLANT APPROACH:'
-            sprintf('  Raw points: %d', sum(~isnan(vtheta_raw)))
-            sprintf('  Raw mean: %.4f um/s', mean(vtheta_raw_valid))
-            sprintf('  Raw std:  %.4f um/s', std(vtheta_raw_valid))
+            sprintf('  Raw points: %d', sum(~isnan(vtheta_raw_nm)))
+            sprintf('  Raw mean: %.2f nm/s', mean(vtheta_raw_valid_nm))
+            sprintf('  Raw std:  %.2f nm/s', std(vtheta_raw_valid_nm))
             ''
             'BINNED (for comparison):'
-            sprintf('  Binned mean: %.4f um/s', mean(vtheta_valid))
-            sprintf('  Binned std:  %.4f um/s', std(vtheta_valid))
+            sprintf('  Binned mean: %.2f nm/s', mean(vtheta_valid_nm))
+            sprintf('  Binned std:  %.2f nm/s', std(vtheta_valid_nm))
             ''
             sprintf('Normal offset: %d px', normalOffsetPx)
             sprintf('Mask area: %.0f px^2', areaMask(fr))
