@@ -427,6 +427,14 @@ fprintf('Generating visualizations...\n');
 
 % --- 1) BASIC SIGNED KYMOGRAPH (original) ---
 fig1 = figure('Position', [100 100 1000 600]);
+imagesc(thetaCenters, time_min, Vtheta_kymo);
+axis tight;
+xlabel('\theta (rad)', 'FontSize', 12);
+ylabel('Time (min)', 'FontSize', 12);
+title('Tangential Cortical Flow v_\theta(\theta,t) - Signed (\mum/s)', 'FontSize', 14);
+colormap(gca, 'parula');
+cb = colorbar;
+ylabel(cb, 'v_\theta (\mum/s)', 'FontSize', 11);
 imagesc(rad2deg(thetaCenters), time_min, Vtheta_kymo);
 axis tight;
 xlabel('Angle (degrees)', 'FontSize', 12);
@@ -436,11 +444,22 @@ colormap(gca, 'parula');
 cb = colorbar;
 ylabel(cb, 'v_\theta (nm/s)', 'FontSize', 11);
 set(gca, 'FontSize', 11);
+% Set x-axis ticks at 0, π/2, π, 3π/2, 2π
+xticks([0 pi/2 pi 3*pi/2 2*pi]);
+xticklabels({'0', '\pi/2', '\pi', '3\pi/2', '2\pi'});
 exportgraphics(fig1, fullfile(outDir_kymographs,'kymograph_vtheta_signed.png'), 'Resolution', 300);
 
 if makeEnhancedKymographs
     % --- 2) MAGNITUDE KYMOGRAPH (absolute values) ---
     fig2 = figure('Position', [100 100 1000 600]);
+    imagesc(thetaCenters, time_min, abs(Vtheta_kymo));
+    axis tight;
+    xlabel('\theta (rad)', 'FontSize', 12);
+    ylabel('Time (min)', 'FontSize', 12);
+    title('Tangential Flow Magnitude |v_\theta(\theta,t)| (\mum/s)', 'FontSize', 14);
+    colormap(gca, 'hot');
+    cb = colorbar;
+    ylabel(cb, '|v_\theta| (\mum/s)', 'FontSize', 11);
     imagesc(rad2deg(thetaCenters), time_min, abs(Vtheta_kymo));
     axis tight;
     xlabel('Angle (degrees)', 'FontSize', 12);
@@ -450,10 +469,17 @@ if makeEnhancedKymographs
     cb = colorbar;
     ylabel(cb, '|v_\theta| (nm/s)', 'FontSize', 11);
     set(gca, 'FontSize', 11);
+    xticks([0 pi/2 pi 3*pi/2 2*pi]);
+    xticklabels({'0', '\pi/2', '\pi', '3\pi/2', '2\pi'});
     exportgraphics(fig2, fullfile(outDir_kymographs,'kymograph_vtheta_magnitude.png'), 'Resolution', 300);
 
     % --- 3) DIRECTIONAL KYMOGRAPH (diverging colormap) ---
     fig3 = figure('Position', [100 100 1000 600]);
+    imagesc(thetaCenters, time_min, Vtheta_kymo);
+    axis tight;
+    xlabel('\theta (rad)', 'FontSize', 12);
+    ylabel('Time (min)', 'FontSize', 12);
+    title('Tangential Flow Directionality (\mum/s)', 'FontSize', 14);
     imagesc(rad2deg(thetaCenters), time_min, Vtheta_kymo);
     axis tight;
     xlabel('Angle (degrees)', 'FontSize', 12);
@@ -470,8 +496,11 @@ if makeEnhancedKymographs
     end
 
     cb = colorbar;
+    ylabel(cb, 'v_\theta (\mum/s): red=CW, blue=CCW', 'FontSize', 10);
     ylabel(cb, 'v_\theta (nm/s): red=CCW, blue=CW', 'FontSize', 10);
     set(gca, 'FontSize', 11);
+    xticks([0 pi/2 pi 3*pi/2 2*pi]);
+    xticklabels({'0', '\pi/2', '\pi', '3\pi/2', '2\pi'});
     exportgraphics(fig3, fullfile(outDir_kymographs,'kymograph_vtheta_directional.png'), 'Resolution', 300);
 
     fprintf('  - Saved 3 kymograph variants\n');
@@ -513,6 +542,11 @@ if makeQuiverOverlays
         [H, W] = size(I);
 
         % Create figure
+        figQ = figure('Visible', 'off', 'Position', [100 100 800 800]);
+        imshow(I, []); hold on; axis on;
+
+        % Plot boundary
+        plot(poly(:,1), poly(:,2), 'y-', 'LineWidth', 2);
         figQ = figure('Visible', 'off', 'Position', [100 100 900 800]);
 
         % =========================================================================
@@ -525,12 +559,30 @@ if makeQuiverOverlays
         BW_frame = poly2mask(poly(:,1), poly(:,2), H, W);
         BW_frame = imfill(BW_frame, 'holes');
 
+        xq = zeros(nQuiver, 1);
+        yq = zeros(nQuiver, 1);
+        uq = zeros(nQuiver, 1);
+        vq = zeros(nQuiver, 1);
+
+        % Get max velocity for normalization (makes arrows visible)
+        vmax_frame = max(abs(vtheta), [], 'omitnan');
+        if isnan(vmax_frame) || vmax_frame == 0
+            vmax_frame = 1;
+        end
+
+        % Arrow length in pixels (adjust quiverScale to change)
+        arrowLengthPx = 40 * quiverScale;
         per_frame = bwperim(BW_frame);
         D_frame = bwdist(per_frame);
 
         % Cortical band: pixels inside BW, between bandOuterPx and bandInnerPx from edge
         cortical_band = BW_frame & (D_frame >= bandOuterPx) & (D_frame <= bandInnerPx);
 
+            if isnan(vtheta_k), continue; end
+
+            % Position on boundary
+            R_mean = mean(RADIUS_OF_CURVATURE(fr, :), 'omitnan');
+            if isnan(R_mean), R_mean = 100; end
         % Create velocity image: assign velocity to each pixel based on its angle
         velocity_image = nan(H, W);
         [yy, xx] = find(cortical_band);
@@ -569,6 +621,23 @@ if makeQuiverOverlays
             velocity_rgb(:,:,c) = channel;
         end
 
+            % Scale arrow by velocity (normalized so max velocity = arrowLengthPx)
+            arrow_scale = arrowLengthPx * (vtheta_k / vmax_frame);
+
+            uq(k) = arrow_scale * tx;
+            vq(k) = arrow_scale * ty;
+        end
+
+        % Remove NaN entries
+        valid = ~isnan(uq) & ~isnan(vq);
+        xq = xq(valid); yq = yq(valid);
+        uq = uq(valid); vq = vq(valid);
+
+        % Plot quiver (no autoscale, we already scaled)
+        quiver(xq, yq, uq, vq, 0, 'Color', [0 1 0], 'LineWidth', 1.5, 'MaxHeadSize', 0.5);
+
+        title(sprintf('Frame %d: Tangential Flow Vectors (t=%.2f min)', fr, time_min(fr)), ...
+            'FontSize', 12, 'Color', 'w');
         % Overlay with transparency (only where cortical band exists)
         h_overlay = image(velocity_rgb);
         alpha_mask = 0.6 * double(cortical_band);  % 60% opacity in cortical band
@@ -761,6 +830,30 @@ if makeSnapshotPlots
 
         % Panel 2: Tangential velocity profile
         subplot(2,3,2);
+        plot(thetaCenters, vtheta, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 8);
+        xlabel('\theta (rad)'); ylabel('v_\theta (\mum/s)');
+        title('Tangential Velocity Profile');
+        grid on;
+        xlim([0 2*pi]);
+        xticks([0 pi/2 pi 3*pi/2 2*pi]);
+        xticklabels({'0', '\pi/2', '\pi', '3\pi/2', '2\pi'});
+
+        % Panel 3: Curvature profile
+        subplot(2,3,3);
+        thetaCurv = linspace(0, 2*pi, numel(radius_curv));  % theta for curvature data
+        plot(thetaCurv, radius_curv, 'r.-', 'LineWidth', 1.5, 'MarkerSize', 8);
+        xlabel('\theta (rad)'); ylabel('Radius of Curvature (px)');
+        title('Boundary Curvature');
+        grid on;
+        xlim([0 2*pi]);
+        xticks([0 pi/2 pi 3*pi/2 2*pi]);
+        xticklabels({'0', '\pi/2', '\pi', '3\pi/2', '2\pi'});
+        % Panel 2: Tangential velocity profile (FIXED Y-AXIS)
+        subplot(3,3,2);
+        plot(1:nThetaBins, vtheta, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 6);
+        hold on;
+        yline(0, 'k--', 'LineWidth', 0.5);
+        xlabel('Angular Bin'); ylabel('v_\theta (μm/s)');
         plot(rad2deg(thetaCenters), vtheta, 'b.-', 'LineWidth', 1.5, 'MarkerSize', 8);
         xlabel('Angle (degrees)'); ylabel('v_\theta (nm/s)');
         title('Tangential Velocity Profile');
@@ -800,6 +893,10 @@ if makeSnapshotPlots
         polarplot(thetaCenters(pos_idx), vtheta_plot(pos_idx), 'r.', 'MarkerSize', 8); hold on;
         polarplot(thetaCenters(neg_idx), abs(vtheta_plot(neg_idx)), 'b.', 'MarkerSize', 8);
         title('v_\theta Directionality');
+        legend({'CW (+)', 'CCW (-)'}, 'Location', 'northeast');  % Visual direction on screen
+
+        % Panel 6: Statistics
+        subplot(2,3,6); axis off;
         legend({'CCW (+)', 'CW (-)'}, 'Location', 'northeast');
         rlim(rlim_vtheta);  % FIXED SCALE
 
