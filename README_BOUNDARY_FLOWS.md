@@ -7,7 +7,7 @@
 ## Key Features
 
 - **Curvature-based boundary reconstruction**: Uses polar coordinate polynomial fitting with wrap-around handling for robust oocyte boundary detection
-- **Strict physical encoding**: All calculations use proper physical units (μm/s) and vector calculus
+- **Strict physical encoding**: All calculations use proper physical units (nm/s) and vector calculus
 - **Tangential flow extraction**: Computes tangential velocity component v·t̂ where t̂ is the unit tangent to the boundary
 - **Angular binning**: Organizes flow data by angular position θ around the oocyte centroid
 - **Smart caching**: Intelligent mask reusability with 5-10× speedup for slow deformations (easily disabled)
@@ -59,7 +59,7 @@ Kymographs are spatiotemporal maps showing how tangential velocity v_θ varies w
 #### Signed Kymograph
 - **File**: `kymographs/kymograph_vtheta_signed.png`
 - **Colormap**: Parula (standard)
-- **X-axis**: Angular bin number (1-101), each bin spans ~3.6 degrees
+- **X-axis**: Angle (0-360 degrees)
 - **Y-axis**: Time (minutes)
 - **Shows**: Raw signed velocity (positive/negative values)
 - **What to look for**:
@@ -71,7 +71,7 @@ Kymographs are spatiotemporal maps showing how tangential velocity v_θ varies w
 #### Magnitude Kymograph
 - **File**: `kymographs/kymograph_vtheta_magnitude.png`
 - **Colormap**: Hot (black → red → yellow → white)
-- **X-axis**: Angular bin number (1-101)
+- **X-axis**: Angle (0-360 degrees)
 - **Y-axis**: Time (minutes)
 - **Shows**: Absolute velocity values |v_θ| (ignores direction)
 - **What to look for**:
@@ -84,7 +84,7 @@ Kymographs are spatiotemporal maps showing how tangential velocity v_θ varies w
 #### Directional Kymograph
 - **File**: `kymographs/kymograph_vtheta_directional.png`
 - **Colormap**: Red-white-blue (diverging, symmetric around zero)
-- **X-axis**: Angular bin number (1-101)
+- **X-axis**: Angle (0-360 degrees)
 - **Y-axis**: Time (minutes)
 - **Shows**: **Red** = counterclockwise (CCW, positive), **Blue** = clockwise (CW, negative), **White** = no flow
 - **What to look for**:
@@ -94,27 +94,61 @@ Kymographs are spatiotemporal maps showing how tangential velocity v_θ varies w
   - **Red-blue asymmetry**: Net angular momentum (more red = net CCW rotation)
 - **Biological interpretation**: Distinguishes contractile (converging) vs. expansive (diverging) flows, reveals flow symmetry breaking during polarization or division
 
-### 2. Quiver Overlays
+### 2. Enhanced Flow Overlays (Color-coded Boundary + Cortical Band Heatmap)
 
-- **Files**: `quiver_overlays/quiver_tangential_fr####.png` (every N frames)
-- **Shows**: Green arrows representing tangential flow vectors overlaid on grayscale oocyte image
-- **Arrow direction**: Points along the tangent to the boundary (perpendicular to radial direction)
-  - **CCW direction**: Arrow points counterclockwise around oocyte
-  - **CW direction**: Arrow points clockwise around oocyte
-- **Arrow length**: Proportional to flow speed (longer = faster flow)
+- **Files**: `quiver_overlays/flow_overlay_fr####.png` (every N frames)
+- **Shows**: Multi-layered visualization combining three complementary views
+
+#### Layer 1: Grayscale Image (Background)
+- Original PolScope image provides anatomical context
+- Allows correlation of flows with cellular structures
+
+#### Layer 2: Semi-transparent Cortical Band Heatmap
+- **What it shows**: Each pixel in the cortical band (3-12 px inside boundary) colored by the tangential velocity at that angular position
+- **Colormap**: Red-white-blue diverging (red=CCW, white=zero, blue=CW)
+- **Transparency**: 60% opacity so underlying image is visible
 - **What to look for**:
-  - **Arrow convergence**: Regions where flows point toward each other (contraction zones, potential furrow sites)
-  - **Arrow divergence**: Regions where flows point away from each other (expansion zones)
-  - **Uniform arrows**: Coherent rotational flow (like a spinning disk)
-  - **Arrow clustering**: Localized high-velocity regions
-- **Biological interpretation**: Visualizes local cortical flow direction and speed. Useful for identifying contractile ring formation, polar body extrusion sites, or cytoplasmic streaming vortices.
+  - **Red regions**: Areas with counterclockwise (positive) tangential flow
+  - **Blue regions**: Areas with clockwise (negative) tangential flow
+  - **White regions**: Areas with minimal tangential flow (flow is radial or zero)
+  - **Sharp color boundaries**: Indicates where flow direction reverses
+  - **Gradient patterns**: Shows smooth transitions vs abrupt flow changes
+
+#### Layer 3: Color-coded Boundary Line
+- **What it shows**: Thick (4 px) boundary line where each segment is colored by local tangential velocity
+- **Colormap**: Same red-white-blue as cortical band (consistent interpretation)
+- **What to look for**:
+  - **Color gradient around boundary**: Shows how flow varies angularly
+  - **Symmetric patterns**: Bipolar (red-blue-red-blue) suggests organized contractile activity
+  - **Localized hot spots**: Strong CCW or CW flow at specific angular positions
+  - **Color continuity**: Smooth vs discontinuous flow fields
+
+#### Layer 4: Sparse Directional Arrows (~12 arrows)
+- **What it shows**: White arrows (with black outline for visibility) showing tangential flow direction
+- **Spacing**: ~12 arrows around the boundary (every ~30°)
+- **Arrow direction**: Points along tangent using polar formula t̂ = (-sin θ, cos θ)
+- **What to look for**:
+  - **Arrow convergence**: Flows pointing toward each other (contraction zone, potential furrow site)
+  - **Arrow divergence**: Flows pointing away from each other (expansion zone)
+  - **Arrow alignment**: Coherent vs chaotic flow patterns
+
+#### Additional Elements
+- **White/black crosshair**: Oocyte centroid (center of polar coordinate system)
+- **Colorbar**: Shows velocity scale (nm/s) with CCW (red) and CW (blue) labels
+- **Info box**: Displays cortical band parameters and max velocity for the frame
+
+**Biological interpretation**: This multi-layered visualization immediately shows:
+1. **WHERE** cortical flows are strongest (brightness/saturation of colors)
+2. **WHICH DIRECTION** flows are moving (red = CCW vs blue = CW)
+3. **WHERE** flow reverses direction (color boundaries)
+4. **HOW** flows relate to oocyte anatomy (overlay on image)
+5. **SPATIAL EXTENT** of active cortical region (heatmap coverage)
 
 **Parameters**:
 ```matlab
 makeQuiverOverlays = true;   % Enable/disable
 quiverEveryNFrames = 10;     % Save every Nth frame
-quiverSubsample = 3;         % Show every 3rd angular bin (reduces clutter)
-quiverScale = 1.5;           % Arrow length scaling
+% Note: Arrow density is now fixed at ~12 arrows for clarity
 ```
 
 ### 3. Tangential Flow Analysis Plots (6-Panel Snapshots)
@@ -136,20 +170,20 @@ snapshotEveryNFrames = 2;  % Save analysis every N frames
 - Shows image quality and boundary detection accuracy
 - **What to look for**: Boundary smoothness, centroid position, overall oocyte shape
 
-**Panel 2: Tangential velocity profile v_θ(bin)**
-- **X-axis**: Angular bin number (1-101)
-- **Y-axis**: Tangential velocity (μm/s)
-- **Plot style**: Blue dash-dot line with markers (.-) for clear bin visualization
+**Panel 2: Tangential velocity profile v_θ(θ)**
+- **X-axis**: Angle (0-360 degrees)
+- **Y-axis**: Tangential velocity (nm/s)
+- **Plot style**: Blue dash-dot line with markers (.-) for clear visualization
 - **What to look for**:
-  - **Peaks**: Regions of maximum flow speed (identify bin numbers)
+  - **Peaks**: Regions of maximum flow speed (identify angular positions)
   - **Troughs**: Regions of minimum or reversed flow
   - **Zero-crossings**: Points where flow direction reverses (CCW ↔ CW)
   - **Sinusoidal patterns**: Suggests dipolar (n=2) or multipolar (n>2) flow symmetry
   - **Sharp transitions**: Abrupt flow changes may indicate contractile boundaries
 - **Biological interpretation**: Identifies dominant flow modes and spatial symmetry. Periodic patterns reveal organized cortical structures.
 
-**Panel 3: Boundary curvature vs bin**
-- **X-axis**: Angular bin number (1-100, one fewer than velocity bins)
+**Panel 3: Boundary curvature vs angle**
+- **X-axis**: Angle (0-360 degrees)
 - **Y-axis**: Radius of curvature (pixels) - larger values = flatter boundary
 - **Plot style**: Red dash-dot line with markers
 - **What to look for**:
@@ -272,10 +306,10 @@ BW = poly2mask(x_boundary, y_boundary, H, W);
 ### 2. Tangential Flow Calculation (Strict Physical Encoding)
 
 #### Physical Units
-All velocities are converted to μm/s:
+All velocities are converted to nm/s:
 ```matlab
-U_μm/s = (U_px/frame / px_per_μm) / dt_sec
-V_μm/s = (V_px/frame / px_per_μm) / dt_sec
+U_nm/s = (U_px/frame / px_per_μm) / dt_sec
+V_nm/s = (V_px/frame / px_per_μm) / dt_sec
 ```
 
 #### Cortical Band Sampling
@@ -287,39 +321,37 @@ inBand = (D >= bandOuterPx) & (D <= bandInnerPx);
 
 Default: 3-12 pixels inside the boundary.
 
-#### Tangent Vector Calculation
-The boundary is parameterized and densely sampled (5000 points), and the unit tangent is computed using **centered finite differences**:
+#### Tangent Vector Calculation (Polar Formulation)
+The tangent vector is computed using the **polar coordinate formulation** standard in SCW (Surface Contraction Wave) analysis literature:
 ```
-       dr/ds
-t̂ = ─────────
-     |dr/ds|
+In polar coordinates centered at oocyte centroid (xc, yc):
+  Radial unit vector:  r̂ = (cos θ, sin θ)
+  Tangent unit vector: t̂ = (-sin θ, cos θ)   [perpendicular to radial, CCW direction]
 ```
 
-Using centered finite difference method (no toolbox required):
+**References**: Bement et al. 2015 (Trends Cell Biol), Maître et al. 2012 (Nature)
+
 ```matlab
-% Densely interpolate boundary
-xDense = interp1(linspace(0,1,nBoundary), xb, linspace(0,1,5000), 'linear');
-yDense = interp1(linspace(0,1,nBoundary), yb, linspace(0,1,5000), 'linear');
+% For each PIV point or boundary point at angle θ relative to centroid:
+theta = atan2(y - yc, x - xc);  % angle of point
 
-% Centered difference with periodic boundary
-for i = 1:nPoints
-    i_prev = mod(i-2, nPoints) + 1;  % wrap around
-    i_next = mod(i, nPoints) + 1;
-    tx(i) = (xDense(i_next) - xDense(i_prev)) / 2;
-    ty(i) = (yDense(i_next) - yDense(i_prev)) / 2;
-end
-
-% Normalize to unit tangent
-t̂ = [tx, ty] / sqrt(tx² + ty²);
+% Tangent vector directly from polar geometry
+tx = -sin(theta);  % x-component of unit tangent
+ty = cos(theta);   % y-component of unit tangent
 ```
 
-This method is faster than spline-based approaches and provides accurate tangent vectors without requiring the Curve Fitting Toolbox.
+**Benefits of polar formulation**:
+- ✅ Physically correct - tangent is perpendicular to radial direction by definition
+- ✅ Matches SCW literature - standard convention for analyzing cortical flows
+- ✅ Consistent - same formula used for tangent calculation and quiver visualization
+- ✅ No numerical errors - exact geometric formula (no finite differences)
+- ✅ Uses curvature information - leverages the polar coordinate system from boundary fit
 
 #### Tangential Velocity Component
 For each PIV vector **v** = (u, v) in the cortical band:
 
 ```
-v_tangential = v · t̂ = u·tx + v·ty   [μm/s]
+v_tangential = v · t̂ = u·tx + v·ty   [nm/s]
 ```
 
 This is the **strict physical encoding** of the tangential flow:
@@ -376,7 +408,7 @@ minSolidity = 0.85;   % Reject if solidity < 0.85
 ### Outputs
 
 #### MAT file: `tangential_kymo_results.mat`
-- `Vtheta_kymo` - [nFrames × nThetaBins] - Mean tangential velocity (μm/s) per angular bin
+- `Vtheta_kymo` - [nFrames × nThetaBins] - Mean tangential velocity (nm/s) per angular bin
 - `Npts_kymo` - [nFrames × nThetaBins] - Number of PIV points per bin
 - `RADIUS_OF_CURVATURE` - [nFrames × nThetaBins-1] - Radius of curvature (pixels) vs angle
 - `thetaCenters` - [1 × nThetaBins] - Angular bin centers (radians)
@@ -394,8 +426,8 @@ All visualizations are saved in organized subdirectories within `tangential_kymo
 - `kymograph_vtheta_magnitude.png` - Absolute velocity |v_θ| with hot colormap
 - `kymograph_vtheta_directional.png` - Directional flow with red-blue diverging colormap
 
-**Quiver overlays** (`quiver_overlays/`, every 10 frames):
-- `quiver_tangential_fr####.png` - Green arrows showing flow direction and magnitude on boundary
+**Enhanced flow overlays** (`quiver_overlays/`, every 10 frames):
+- `flow_overlay_fr####.png` - Multi-layered visualization: cortical band heatmap + color-coded boundary + sparse arrows
 
 **Tangential flow analysis** (`snapshots/`, every 2 frames):
 - `tangential_flow_analysis_fr####.png` - 6-panel analysis: image, profiles, polar plots, statistics
@@ -411,8 +443,8 @@ tangential_kymo_out/
 │   ├── kymograph_vtheta_magnitude.png
 │   └── kymograph_vtheta_directional.png
 ├── quiver_overlays/
-│   ├── quiver_tangential_fr0001.png
-│   ├── quiver_tangential_fr0011.png
+│   ├── flow_overlay_fr0001.png
+│   ├── flow_overlay_fr0011.png
 │   └── ...
 ├── snapshots/
 │   ├── tangential_flow_analysis_fr0001.png
@@ -432,7 +464,7 @@ tangential_kymo_out/
 
 The tangential velocity field **v_θ(θ, t)** represents cortical flows parallel to the oocyte surface:
 
-- **Magnitude**: Speed of material transport along the cortex (μm/s)
+- **Magnitude**: Speed of material transport along the cortex (nm/s)
 - **Sign convention**:
   - **Positive**: Flow in counterclockwise direction (standard mathematical convention)
   - **Negative**: Flow in clockwise direction
@@ -572,6 +604,10 @@ Y = Y - cropRect(2);
 2. **Polar curvature**: Standard differential geometry formula for curvature of polar curves
 3. **Kymograph methodology**: Adapted from `kymograph.m` in this codebase
 4. **PIV masking**: Based on `SCW_flows_curvature.m` implementation
+5. **SCW analysis methodology**:
+   - Bement WM, Leda M, Mori Y, et al. (2015) "Activator-inhibitor coupling between Rho signalling and actin assembly makes the cell cortex an excitable medium." *Nat Cell Biol.* 17(11):1471-83.
+   - Maître JL, Niwayama R, Turlier H, et al. (2015) "Pulsatile cell-autonomous contractility drives compaction in the mouse embryo." *Nat Cell Biol.* 17(7):849-55.
+   - Reymann AC, Staniscia F, Erzberger A, et al. (2016) "Cortical flow aligns actin filaments to form a furrow." *eLife* 5:e17807.
 
 ## Citation
 
@@ -586,7 +622,20 @@ boundary_flows.m - Curvature-based boundary reconstruction with strict physical 
 
 ### Version History
 
-**v2.0 - January 2026** (Latest)
+**v2.2 - January 2026** (Latest)
+- **Enhanced flow overlays**: New multi-layered visualization combining:
+  - Semi-transparent cortical band heatmap (shows velocity in sampling region)
+  - Color-coded boundary line (velocity mapped to boundary color)
+  - Sparse directional arrows (~12 arrows for clarity)
+- **Improved colorbar**: Positioned outside image with CCW/CW labels
+
+**v2.1 - January 2026**
+- **Polar tangent formulation**: Replaced finite-difference tangent calculation with polar formula t̂ = (-sin θ, cos θ) matching SCW analysis literature (Bement et al. 2015, Maître et al. 2012)
+- **PIV mapping improvement**: Each PIV vector now uses tangent at its own angular position (not nearest boundary point)
+- **Kymograph x-axis**: Changed from bin numbers to degrees (0-360°) for better interpretability
+- **Snapshot plots**: Updated to show angles in degrees
+
+**v2.0 - January 2026**
 - Added smart caching system with 5-10× speedup for slow deformations
 - Added comprehensive visualizations: quiver overlays, 3 kymograph variants, snapshot analysis
 - Improved diagnostics and performance tracking
