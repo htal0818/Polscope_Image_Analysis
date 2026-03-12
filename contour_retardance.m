@@ -1,17 +1,19 @@
 % contour_retardance.m
-% Measure retardance at the oocyte contour from LC Polscope image stacks.
+% Measure retardance (nm) at the oocyte contour from LC Polscope image stacks.
 %
 % This script:
 %   1. Loads LC Polscope retardance image stacks (multipage TIFF, folder of
 %      TIFFs, or 4-state raw Polscope channels)
-%   2. Detects the oocyte boundary using Otsu thresholding + bwboundaries
-%      (same proven approach as image_segment_test.m)
-%   3. Samples retardance along the detected contour at each time point
-%   4. Computes angle-averaged radial intensity profiles from the center
+%   2. Converts raw pixel values to retardance in nm using the Polscope
+%      retardance ceiling
+%   3. Detects the oocyte outer boundary using heavy Gaussian blur + Otsu
+%      thresholding + morphological cleanup + bwboundaries
+%   4. Samples retardance (nm) along the detected contour at each time point
+%   5. Computes angle-averaged radial retardance profiles from the center
 %      outward through the cortex
-%   5. Generates:
+%   6. Generates:
 %        - Retardance kymograph (angle vs time at the cortex)
-%        - Radial profiles (center → cortex → outside)
+%        - Radial profiles (center -> cortex -> outside)
 %        - Mean contour retardance time series
 %        - Overlay visualizations of detected boundary
 %
@@ -51,14 +53,18 @@ cropRect = [500 500 2000 2000];  % [x y w h] in pixels
 
 % --- Timing & calibration ---
 dt_sec    = 15;        % seconds per frame
-px_per_um = 6.25;      % pixels per micron
+px_per_um = 6.25;      % pixels per micron (adjust for your objective/camera)
+
+% --- Retardance calibration ---
+retardance_ceiling_nm = 50;   % Polscope retardance ceiling (nm)
+bit_depth = 16;               % image bit depth (16-bit = 0..65535)
 
 % --- Boundary detection parameters ---
-sigmaBlur = 2;         % Gaussian blur sigma (px) for segmentation
-minArea   = 200;       % minimum object area (px^2) to keep
-
-% --- Cortical band width (for radial sampling near boundary) ---
-bandWidth_um = 3;      % sample retardance within this distance of boundary (um)
+% Heavy blur washes out internal oocyte structure so Otsu finds the gross
+% egg shape. Only used for mask creation — all measurements use raw data.
+sigmaBlur   = 20;      % Gaussian blur sigma (px) for segmentation mask
+closeRadius = 25;      % morphological close disk radius (px)
+minArea     = 5000;    % minimum object area (px^2) to reject debris
 
 % --- Radial profile parameters ---
 radialStep_um  = 0.5;  % radial sampling step (microns)
@@ -125,7 +131,7 @@ if saveOverlays
 end
 
 um_per_px = 1 / px_per_um;
-bandWidth_px = bandWidth_um * px_per_um;
+maxPixVal = 2^bit_depth - 1;  % 65535 for 16-bit
 
 % Time axis
 time_sec = (0:nFrames-1)' * dt_sec;
@@ -135,9 +141,8 @@ time_min = time_sec / 60;
 angles_deg = linspace(0, 360, nThetaBins);
 thetaBinEdges = linspace(0, 2*pi, nThetaBins+1);
 
-% Radial axis: from center out to ~1.5x expected oocyte radius
-% (will be trimmed after first frame establishes actual radius)
-maxRadius_um = 120;  % generous upper bound; will auto-trim
+% Radial axis: generous upper bound, trimmed after processing
+maxRadius_um = 150;
 radialAxis_um = 0 : radialStep_um : maxRadius_um;
 nRadial = numel(radialAxis_um);
 radialAxis_px = radialAxis_um / um_per_px;
@@ -146,13 +151,13 @@ radialAxis_px = radialAxis_um / um_per_px;
 % Kymograph: retardance at boundary vs angle over time
 kymo = nan(nFrames, nThetaBins);
 
-% Contour statistics per frame
+% Contour statistics per frame (in nm)
 contourMean = nan(nFrames, 1);
 contourStd  = nan(nFrames, 1);
 contourMax  = nan(nFrames, 1);
 contourMin  = nan(nFrames, 1);
 
-% Radial profiles: [nFrames x nRadial]
+% Radial profiles: [nFrames x nRadial] (in nm)
 radialProfiles = nan(nFrames, nRadial);
 
 % Boundary tracking
@@ -169,23 +174,29 @@ tic;
 
 for fr = 1:nFrames
 
-    %% ----- Load image -----
+    %% ----- Load image and convert to retardance (nm) -----
     Iraw = readFrame(fr);
     if doCrop
         Iraw = imcrop(Iraw, cropRect);
     end
     [H, W] = size(Iraw);
-    I = im2double(Iraw / max(Iraw(:)));  % normalize to [0,1]
 
-    %% ----- Boundary detection (Otsu + bwboundaries) -----
-    % Follows the proven approach from image_segment_test.m:
-    % oocyte is BRIGHT in retardance images, so threshold picks bright regions
+    % Convert raw pixel values to retardance in nm
+    Iret = (Iraw / maxPixVal) * retardance_ceiling_nm;
 
-    I_blur = imgaussfilt(I, sigmaBlur);
+    %% ----- Boundary detection -----
+    % Heavy blur on raw image to wash out internal structure.
+    % This blurred image is ONLY used for mask creation.
+    I_blur = imgaussfilt(Iraw, sigmaBlur);
 
-    % Otsu threshold
-    Totsu = graythresh(I_blur);
-    BW = I_blur > Totsu;
+    % Otsu threshold (normalize temporarily for graythresh)
+    I_norm = I_blur / max(I_blur(:));
+    Totsu = graythresh(I_norm);
+    BW = I_norm > Totsu;
+
+    % Aggressive morphological cleanup
+    se = strel('disk', closeRadius);
+    BW = imclose(BW, se);
     BW = imfill(BW, 'holes');
     BW = bwareaopen(BW, minArea);
 
@@ -194,6 +205,7 @@ for fr = 1:nFrames
         [Gmag, ~] = imgradient(I_blur);
         thrG = max(2*mean(Gmag(:)), prctile(Gmag(:), 80));
         BW = Gmag >= thrG;
+        BW = imclose(BW, se);
         BW = imfill(BW, 'holes');
         BW = bwareaopen(BW, minArea);
     end
@@ -206,7 +218,6 @@ for fr = 1:nFrames
         BW = (L == iMax);
         C = S(iMax).Centroid;  % [x, y]
     elseif ~isempty(prevBW)
-        % Reuse previous frame's mask
         BW = prevBW;
         C = prevC;
     else
@@ -216,7 +227,6 @@ for fr = 1:nFrames
 
     prevBW = BW;
     prevC = C;
-    centroidXY(fr,:) = C;
 
     %% ----- Extract boundary contour -----
     B = bwboundaries(BW);
@@ -225,7 +235,7 @@ for fr = 1:nFrames
         continue;
     end
 
-    % Pick the longest boundary (largest object)
+    % Pick the longest boundary (outer contour of largest object)
     [~, iLongest] = max(cellfun(@(p) size(p,1), B));
     bnd = B{iLongest};  % [row, col] = [y, x]
     yb = bnd(:,1);
@@ -237,13 +247,13 @@ for fr = 1:nFrames
     meanRadius_px(fr) = R_fit;
 
     %% ----- Retardance along the boundary (kymograph row) -----
-    % Compute angle of each boundary point relative to center
+    % Angle of each boundary point relative to center
     th = atan2(yb - yc, xb - xc);
     th(th < 0) = th(th < 0) + 2*pi;
 
-    % Interpolate retardance at boundary pixel locations
-    F = griddedInterpolant({1:H, 1:W}, Iraw, 'linear', 'nearest');
-    ib = F(yb, xb);  % retardance intensity at each boundary point
+    % Interpolate retardance (nm) at boundary pixel locations
+    F = griddedInterpolant({1:H, 1:W}, Iret, 'linear', 'nearest');
+    ib = F(yb, xb);  % retardance in nm at each boundary point
 
     % Bin by angle
     bin = discretize(th, thetaBinEdges);
@@ -251,7 +261,7 @@ for fr = 1:nFrames
 
     row = nan(1, nThetaBins);
     if any(valid)
-        sumBins   = accumarray(bin(valid), ib(valid), [nThetaBins 1], @nanmean, NaN);
+        sumBins = accumarray(bin(valid), ib(valid), [nThetaBins 1], @nanmean, NaN);
         row = sumBins';
     end
 
@@ -259,7 +269,6 @@ for fr = 1:nFrames
     bad = isnan(row);
     if any(bad) && sum(~bad) >= 2
         goodIdx = find(~bad);
-        % Wrap for circular interpolation
         xw = [goodIdx - nThetaBins, goodIdx, goodIdx + nThetaBins];
         vw = [row(goodIdx), row(goodIdx), row(goodIdx)];
         row(bad) = interp1(xw, vw, find(bad), 'linear', 'extrap');
@@ -267,13 +276,13 @@ for fr = 1:nFrames
 
     kymo(fr,:) = row;
 
-    %% ----- Contour retardance statistics -----
+    %% ----- Contour retardance statistics (nm) -----
     contourMean(fr) = mean(ib, 'omitnan');
     contourStd(fr)  = std(ib, 'omitnan');
     contourMax(fr)  = max(ib);
     contourMin(fr)  = min(ib);
 
-    %% ----- Angle-averaged radial profile (center outward) -----
+    %% ----- Angle-averaged radial profile (center outward, in nm) -----
     sampleAngles = linspace(0, 2*pi, nAngleSamples+1);
     sampleAngles(end) = [];
 
@@ -303,17 +312,19 @@ for fr = 1:nFrames
     %% ----- Save overlay -----
     if saveOverlays && (fr == 1 || mod(fr, overlayEveryN) == 0)
         fig = figure('Visible', 'off', 'Position', [100 100 800 600]);
-        imagesc(Iraw); colormap gray; axis image; hold on;
+        imagesc(Iret); colormap gray; axis image; hold on;
         plot(xb, yb, 'r-', 'LineWidth', 1.2);
         plot(xc, yc, 'g+', 'MarkerSize', 12, 'LineWidth', 2);
 
-        % Show cortical band
+        % Show circle fit
         theta_circ = linspace(0, 2*pi, 200);
         plot(xc + R_fit*cos(theta_circ), yc + R_fit*sin(theta_circ), ...
             'c--', 'LineWidth', 0.8);
-        title(sprintf('Frame %d / %d  —  %s', fr, nFrames, frameName(fr)), ...
+
+        title(sprintf('Frame %d / %d  (R=%.0f px = %.0f um)  —  %s', ...
+            fr, nFrames, R_fit, R_fit*um_per_px, frameName(fr)), ...
             'Interpreter', 'none');
-        colorbar;
+        cb = colorbar; cb.Label.String = 'Retardance (nm)';
         exportgraphics(gca, fullfile(overlayDir, sprintf('overlay_%04d.png', fr)));
         close(fig);
     end
@@ -328,7 +339,6 @@ elapsed = toc;
 fprintf('Done! %.1f sec total (%.2f sec/frame)\n\n', elapsed, elapsed/nFrames);
 
 %% ========================== TRIM RADIAL AXIS ==============================
-% Trim radial profiles to 1.5x the median oocyte radius
 medianR_um = nanmedian(meanRadius_px) * um_per_px;
 trimIdx = find(radialAxis_um <= medianR_um * 1.5, 1, 'last');
 if isempty(trimIdx); trimIdx = nRadial; end
@@ -346,7 +356,7 @@ xlabel('Angle around cortex (deg)', 'FontSize', 12);
 ylabel('Time (min)', 'FontSize', 12);
 title('Retardance at Cortex (angle vs time)', 'FontSize', 14);
 colormap parula; cb = colorbar;
-cb.Label.String = 'Retardance (a.u.)';
+cb.Label.String = 'Retardance (nm)';
 cb.Label.FontSize = 11;
 exportgraphics(fig1, fullfile(outDir, 'kymograph_retardance_vs_angle.png'), 'Resolution', 200);
 savefig(fig1, fullfile(outDir, 'kymograph_retardance_vs_angle.fig'));
@@ -366,13 +376,12 @@ for i = 1:numel(displayFrames)
         'Color', cmap(i,:), 'LineWidth', 1.3, ...
         'DisplayName', sprintf('t=%.0fs', time_sec(fr)));
 end
-% Mark median cortex position
 if ~isnan(medianR_um)
     xline(medianR_um, 'r--', 'Cortex', 'LineWidth', 1.5, ...
         'LabelOrientation', 'aligned', 'FontSize', 10);
 end
 xlabel('Distance from center (\mum)', 'FontSize', 12);
-ylabel('Retardance (a.u.)', 'FontSize', 12);
+ylabel('Retardance (nm)', 'FontSize', 12);
 title('Radial Retardance Profiles (center \rightarrow cortex)', 'FontSize', 14);
 grid on;
 legend('show', 'Location', 'eastoutside', 'FontSize', 7);
@@ -385,13 +394,12 @@ fig3 = figure('Position', [100 100 900 500]);
 imagesc(radialAxis_um_trim, time_min, radialProfiles_trim);
 set(gca, 'YDir', 'normal');
 hold on;
-% Mark cortex position per frame
 plot(meanRadius_px * um_per_px, time_min, 'r-', 'LineWidth', 1.5);
 xlabel('Distance from center (\mum)', 'FontSize', 12);
 ylabel('Time (min)', 'FontSize', 12);
 title('Retardance: Radial Distance vs Time', 'FontSize', 14);
 colormap parula; cb = colorbar;
-cb.Label.String = 'Retardance (a.u.)';
+cb.Label.String = 'Retardance (nm)';
 cb.Label.FontSize = 11;
 legend('Cortex boundary', 'Location', 'northeast');
 exportgraphics(fig3, fullfile(outDir, 'radial_heatmap_distance_vs_time.png'), 'Resolution', 200);
@@ -408,7 +416,7 @@ fill([time_min; flipud(time_min)], ...
      [contourMean - contourStd; flipud(contourMean + contourStd)], ...
      'b', 'FaceAlpha', 0.2, 'EdgeColor', 'none');
 xlabel('Time (min)', 'FontSize', 11);
-ylabel('Retardance (a.u.)', 'FontSize', 11);
+ylabel('Retardance (nm)', 'FontSize', 11);
 title('Mean Contour Retardance Over Time', 'FontSize', 13);
 grid on;
 legend('Mean', '\pm1 SD', 'Location', 'best');
@@ -418,7 +426,7 @@ plot(time_min, contourMax, 'r-', 'LineWidth', 1.2); hold on;
 plot(time_min, contourMin, 'b-', 'LineWidth', 1.2);
 plot(time_min, contourMean, 'k-', 'LineWidth', 1.5);
 xlabel('Time (min)', 'FontSize', 11);
-ylabel('Retardance (a.u.)', 'FontSize', 11);
+ylabel('Retardance (nm)', 'FontSize', 11);
 title('Contour Retardance Range', 'FontSize', 13);
 legend('Max', 'Min', 'Mean', 'Location', 'best');
 grid on;
@@ -439,27 +447,30 @@ close(fig5);
 
 %% ========================== SAVE DATA =====================================
 results = struct();
-results.kymo            = kymo;
-results.angles_deg      = angles_deg;
-results.radialProfiles  = radialProfiles_trim;
-results.radialAxis_um   = radialAxis_um_trim;
-results.contourMean     = contourMean;
-results.contourStd      = contourStd;
-results.contourMax      = contourMax;
-results.contourMin      = contourMin;
-results.centroidXY      = centroidXY;
-results.meanRadius_px   = meanRadius_px;
-results.meanRadius_um   = meanRadius_px * um_per_px;
-results.time_sec        = time_sec;
-results.time_min        = time_min;
-results.nFrames         = nFrames;
-results.dt_sec          = dt_sec;
-results.px_per_um       = px_per_um;
-results.nThetaBins      = nThetaBins;
-results.nAngleSamples   = nAngleSamples;
-results.inputMode       = inputMode;
-results.sigmaBlur       = sigmaBlur;
-results.minArea         = minArea;
+results.kymo                  = kymo;
+results.angles_deg            = angles_deg;
+results.radialProfiles_nm     = radialProfiles_trim;
+results.radialAxis_um         = radialAxis_um_trim;
+results.contourMean_nm        = contourMean;
+results.contourStd_nm         = contourStd;
+results.contourMax_nm         = contourMax;
+results.contourMin_nm         = contourMin;
+results.centroidXY            = centroidXY;
+results.meanRadius_px         = meanRadius_px;
+results.meanRadius_um         = meanRadius_px * um_per_px;
+results.time_sec              = time_sec;
+results.time_min              = time_min;
+results.nFrames               = nFrames;
+results.dt_sec                = dt_sec;
+results.px_per_um             = px_per_um;
+results.retardance_ceiling_nm = retardance_ceiling_nm;
+results.bit_depth             = bit_depth;
+results.nThetaBins            = nThetaBins;
+results.nAngleSamples         = nAngleSamples;
+results.inputMode             = inputMode;
+results.sigmaBlur             = sigmaBlur;
+results.closeRadius           = closeRadius;
+results.minArea               = minArea;
 
 save(fullfile(outDir, 'contour_retardance_results.mat'), '-struct', 'results');
 fprintf('Saved results to: %s\n', fullfile(outDir, 'contour_retardance_results.mat'));
@@ -468,8 +479,9 @@ fprintf('Saved results to: %s\n', fullfile(outDir, 'contour_retardance_results.m
 fprintf('\n========== SUMMARY ==========\n');
 fprintf('Frames processed: %d\n', sum(~isnan(contourMean)));
 fprintf('Duration: %.1f min\n', max(time_min));
-fprintf('Median oocyte radius: %.1f um\n', medianR_um);
-fprintf('Mean contour retardance: %.2f +/- %.2f\n', ...
+fprintf('Median oocyte radius: %.1f um (%.0f px)\n', medianR_um, nanmedian(meanRadius_px));
+fprintf('Retardance ceiling: %.0f nm (%d-bit)\n', retardance_ceiling_nm, bit_depth);
+fprintf('Mean contour retardance: %.2f +/- %.2f nm\n', ...
     mean(contourMean, 'omitnan'), std(contourMean, 'omitnan'));
 fprintf('Outputs saved to: %s\n', outDir);
 fprintf('=============================\n');
