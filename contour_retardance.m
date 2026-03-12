@@ -66,6 +66,7 @@ bit_depth = 16;               % image bit depth (16-bit = 0..65535)
 sigmaGrad    = 5;       % Gaussian blur sigma (px) before gradient (noise reduction)
 nRays        = 360;     % number of radial rays for boundary detection
 minEdgeFrac  = 0.3;     % search for edge in outer portion of ray (0.3 = outer 70%)
+boundaryInset_px = 10;  % shift boundary inward (px) onto cortical ring center
 
 % --- Radial profile parameters ---
 radialStep_um  = 0.5;  % radial sampling step (microns)
@@ -236,6 +237,10 @@ for fr = 1:nFrames
         iPeak = iPeak + startIdx - 1;
         edgeR(ri) = rvals(iPeak);
     end
+
+    % Shift boundary inward onto cortical ring center
+    edgeR = edgeR - boundaryInset_px;
+    edgeR = max(edgeR, 1);
 
     % Convert edge points to Cartesian
     validRays = ~isnan(edgeR);
@@ -479,6 +484,7 @@ results.inputMode             = inputMode;
 results.sigmaGrad             = sigmaGrad;
 results.nRays                 = nRays;
 results.minEdgeFrac           = minEdgeFrac;
+results.boundaryInset_px      = boundaryInset_px;
 
 save(fullfile(outDir, 'contour_retardance_results.mat'), '-struct', 'results');
 fprintf('Saved results to: %s\n', fullfile(outDir, 'contour_retardance_results.mat'));
