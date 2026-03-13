@@ -190,19 +190,25 @@ for fr = 1:nFrames
 
     I_blur = imgaussfilt(Iraw, sigmaGrad);
 
-    % Rough center estimate: centroid of above-background pixels
-    I_norm = I_blur / max(I_blur(:));
-    roughMask = I_norm > 0.15;  % very permissive, just for centroid
-    roughMask = imfill(roughMask, 'holes');
-    props = regionprops(roughMask, 'Area', 'Centroid');
-    if ~isempty(props)
-        [~, iMax] = max([props.Area]);
-        roughCenter = props(iMax).Centroid;  % [x, y]
+    % Center estimate: reuse previous frame's circle fit if available
+    if fr > 1 && ~isnan(centroidXY(fr-1,1))
+        cx0 = centroidXY(fr-1,1);
+        cy0 = centroidXY(fr-1,2);
     else
-        roughCenter = [W/2, H/2];
+        % First frame (or after a skip): compute from mask
+        I_norm = I_blur / max(I_blur(:));
+        roughMask = I_norm > 0.15;
+        roughMask = imfill(roughMask, 'holes');
+        props = regionprops(roughMask, 'Area', 'Centroid');
+        if ~isempty(props)
+            [~, iMax] = max([props.Area]);
+            roughCenter = props(iMax).Centroid;
+        else
+            roughCenter = [W/2, H/2];
+        end
+        cx0 = roughCenter(1);
+        cy0 = roughCenter(2);
     end
-    cx0 = roughCenter(1);
-    cy0 = roughCenter(2);
 
     % Maximum radial extent to search (stay within image)
     maxR_px = floor(min([cx0-1, W-cx0, cy0-1, H-cy0])) - 1;
@@ -238,10 +244,6 @@ for fr = 1:nFrames
         edgeR(ri) = rvals(iPeak);
     end
 
-    % Shift boundary inward onto cortical ring center
-    edgeR = edgeR - boundaryInset_px;
-    edgeR = max(edgeR, 1);
-
     % Convert edge points to Cartesian
     validRays = ~isnan(edgeR);
     xb = cx0 + edgeR(validRays) .* cos(rayAngles(validRays)');
@@ -256,6 +258,13 @@ for fr = 1:nFrames
     [R_fit, xc, yc] = circfit(xb, yb);
     centroidXY(fr,:) = [xc, yc];
     meanRadius_px(fr) = R_fit;
+
+    % Shrink boundary inward onto cortical ring center (after circle fit)
+    dx = xb - xc;  dy = yb - yc;
+    dist = sqrt(dx.^2 + dy.^2);
+    scale = max(dist - boundaryInset_px, 1) ./ dist;
+    xb = xc + dx .* scale;
+    yb = yc + dy .* scale;
 
     %% ----- Retardance along the boundary (kymograph row) -----
     % Angle of each boundary point relative to center
