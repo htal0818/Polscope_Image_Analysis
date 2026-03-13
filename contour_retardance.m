@@ -60,11 +60,13 @@ retardance_ceiling_nm = 50;   % Polscope retardance ceiling (nm)
 bit_depth = 16;               % image bit depth (16-bit = 0..65535)
 
 % --- Boundary detection parameters ---
-% Heavy blur washes out internal oocyte structure so Otsu finds the gross
-% egg shape. Only used for mask creation — all measurements use raw data.
-sigmaBlur   = 20;      % Gaussian blur sigma (px) for segmentation mask
-closeRadius = 25;      % morphological close disk radius (px)
-minArea     = 5000;    % minimum object area (px^2) to reject debris
+% Uses radial gradient peak method: for each angle from center, find the
+% steepest intensity drop (cortex-to-background edge). Robust to internal
+% oocyte contrast variations.
+sigmaGrad    = 5;       % Gaussian blur sigma (px) before gradient (noise reduction)
+nRays        = 360;     % number of radial rays for boundary detection
+minEdgeFrac  = 0.3;     % search for edge in outer portion of ray (0.3 = outer 70%)
+boundaryInset_px = 10;  % shift boundary inward (px) onto cortical ring center
 
 % --- Radial profile parameters ---
 radialStep_um  = 0.5;  % radial sampling step (microns)
@@ -164,9 +166,6 @@ radialProfiles = nan(nFrames, nRadial);
 centroidXY = nan(nFrames, 2);
 meanRadius_px = nan(nFrames, 1);
 
-% For fallback: previous frame's mask
-prevBW = [];
-prevC  = [];
 
 %% ========================== MAIN LOOP =====================================
 fprintf('Processing %d frames...\n', nFrames);
@@ -184,62 +183,74 @@ for fr = 1:nFrames
     % Convert raw pixel values to retardance in nm
     Iret = (Iraw / maxPixVal) * retardance_ceiling_nm;
 
-    %% ----- Boundary detection -----
-    % Heavy blur on raw image to wash out internal structure.
-    % This blurred image is ONLY used for mask creation.
-    I_blur = imgaussfilt(Iraw, sigmaBlur);
+    %% ----- Boundary detection (radial peak intensity method) -----
+    % Strategy: the cortex is the brightest ring in retardance images.
+    % For each radial ray from center outward, find the peak intensity
+    % in the outer portion — that's directly ON the cortex.
 
-    % Otsu threshold (normalize temporarily for graythresh)
+    I_blur = imgaussfilt(Iraw, sigmaGrad);
+
+    % Rough center estimate: centroid of above-background pixels
     I_norm = I_blur / max(I_blur(:));
-    Totsu = graythresh(I_norm);
-    BW = I_norm > Totsu;
-
-    % Aggressive morphological cleanup
-    se = strel('disk', closeRadius);
-    BW = imclose(BW, se);
-    BW = imfill(BW, 'holes');
-    BW = bwareaopen(BW, minArea);
-
-    % Fallback: gradient-based if Otsu fails
-    if ~any(BW(:))
-        [Gmag, ~] = imgradient(I_blur);
-        thrG = max(2*mean(Gmag(:)), prctile(Gmag(:), 80));
-        BW = Gmag >= thrG;
-        BW = imclose(BW, se);
-        BW = imfill(BW, 'holes');
-        BW = bwareaopen(BW, minArea);
-    end
-
-    % Keep largest connected component
-    L = bwlabel(BW, 8);
-    if max(L(:)) >= 1
-        S = regionprops(L, 'Area', 'Centroid');
-        [~, iMax] = max([S.Area]);
-        BW = (L == iMax);
-        C = S(iMax).Centroid;  % [x, y]
-    elseif ~isempty(prevBW)
-        BW = prevBW;
-        C = prevC;
+    roughMask = I_norm > 0.15;  % very permissive, just for centroid
+    roughMask = imfill(roughMask, 'holes');
+    props = regionprops(roughMask, 'Area', 'Centroid');
+    if ~isempty(props)
+        [~, iMax] = max([props.Area]);
+        roughCenter = props(iMax).Centroid;  % [x, y]
     else
-        fprintf('  Frame %d: no boundary found, skipping.\n', fr);
-        continue;
+        roughCenter = [W/2, H/2];
+    end
+    cx0 = roughCenter(1);
+    cy0 = roughCenter(2);
+
+    % Maximum radial extent to search (stay within image)
+    maxR_px = floor(min([cx0-1, W-cx0, cy0-1, H-cy0])) - 1;
+    if maxR_px < 20
+        maxR_px = round(min(H, W) / 2) - 1;
     end
 
-    prevBW = BW;
-    prevC = C;
+    % Cast radial rays and find peak INTENSITY in outer portion of each
+    rayAngles = linspace(0, 2*pi, nRays+1);
+    rayAngles(end) = [];
+    rSamples = 1:maxR_px;
+    edgeR = nan(nRays, 1);
 
-    %% ----- Extract boundary contour -----
-    B = bwboundaries(BW);
-    if isempty(B)
-        fprintf('  Frame %d: bwboundaries returned empty, skipping.\n', fr);
-        continue;
+    Fraw = griddedInterpolant({1:H, 1:W}, I_blur, 'linear', 'nearest');
+
+    for ri = 1:nRays
+        ang = rayAngles(ri);
+        xs = cx0 + rSamples * cos(ang);
+        ys = cy0 + rSamples * sin(ang);
+
+        % Clip to image bounds
+        inBounds = xs >= 1 & xs <= W & ys >= 1 & ys <= H;
+        if sum(inBounds) < 10; continue; end
+
+        ivals = Fraw(ys(inBounds), xs(inBounds));
+        rvals = rSamples(inBounds);
+
+        % Search for peak intensity in the outer portion of the ray
+        % (skip inner region to avoid internal bright spots)
+        startIdx = max(1, round(numel(ivals) * minEdgeFrac));
+        [~, iPeak] = max(ivals(startIdx:end));
+        iPeak = iPeak + startIdx - 1;
+        edgeR(ri) = rvals(iPeak);
     end
 
-    % Pick the longest boundary (outer contour of largest object)
-    [~, iLongest] = max(cellfun(@(p) size(p,1), B));
-    bnd = B{iLongest};  % [row, col] = [y, x]
-    yb = bnd(:,1);
-    xb = bnd(:,2);
+    % Shift boundary inward onto cortical ring center
+    edgeR = edgeR - boundaryInset_px;
+    edgeR = max(edgeR, 1);
+
+    % Convert edge points to Cartesian
+    validRays = ~isnan(edgeR);
+    xb = cx0 + edgeR(validRays) .* cos(rayAngles(validRays)');
+    yb = cy0 + edgeR(validRays) .* sin(rayAngles(validRays)');
+
+    if numel(xb) < 20
+        fprintf('  Frame %d: too few edge points (%d), skipping.\n', fr, numel(xb));
+        continue;
+    end
 
     %% ----- Circle fit for center & radius -----
     [R_fit, xc, yc] = circfit(xb, yb);
@@ -313,13 +324,15 @@ for fr = 1:nFrames
     if saveOverlays && (fr == 1 || mod(fr, overlayEveryN) == 0)
         fig = figure('Visible', 'off', 'Position', [100 100 800 600]);
         imagesc(Iret); colormap gray; axis image; hold on;
-        plot(xb, yb, 'r-', 'LineWidth', 1.2);
-        plot(xc, yc, 'g+', 'MarkerSize', 12, 'LineWidth', 2);
+
+        % Show detected edge points
+        plot(xb, yb, 'r.', 'MarkerSize', 4);
 
         % Show circle fit
         theta_circ = linspace(0, 2*pi, 200);
         plot(xc + R_fit*cos(theta_circ), yc + R_fit*sin(theta_circ), ...
-            'c--', 'LineWidth', 0.8);
+            'c-', 'LineWidth', 1.5);
+        plot(xc, yc, 'g+', 'MarkerSize', 12, 'LineWidth', 2);
 
         title(sprintf('Frame %d / %d  (R=%.0f px = %.0f um)  —  %s', ...
             fr, nFrames, R_fit, R_fit*um_per_px, frameName(fr)), ...
@@ -468,9 +481,10 @@ results.bit_depth             = bit_depth;
 results.nThetaBins            = nThetaBins;
 results.nAngleSamples         = nAngleSamples;
 results.inputMode             = inputMode;
-results.sigmaBlur             = sigmaBlur;
-results.closeRadius           = closeRadius;
-results.minArea               = minArea;
+results.sigmaGrad             = sigmaGrad;
+results.nRays                 = nRays;
+results.minEdgeFrac           = minEdgeFrac;
+results.boundaryInset_px      = boundaryInset_px;
 
 save(fullfile(outDir, 'contour_retardance_results.mat'), '-struct', 'results');
 fprintf('Saved results to: %s\n', fullfile(outDir, 'contour_retardance_results.mat'));
