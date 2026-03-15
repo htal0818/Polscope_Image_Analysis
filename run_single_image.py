@@ -299,8 +299,8 @@ def run_analysis(image_path, out_dir=None):
 
     # --- Plot 1: Overlay ---
     fig, ax = plt.subplots(1, 1, figsize=(10, 8))
-    vmax = np.percentile(Iret[Iret > 0], 99) if np.any(Iret > 0) else Iret.max()
-    im = ax.imshow(Iret, cmap='gray', vmin=0, vmax=max(vmax, 0.01),
+    vmax = retardance_ceiling_nm
+    im = ax.imshow(Iret, cmap='gray', vmin=0, vmax=vmax,
                    origin='upper', extent=[0, W, H, 0], aspect='equal')
     ax.plot(xb_s, yb_s, 'r-', linewidth=0.8, label='Boundary (shrunk)')
     ax.plot(np.append(polyX, polyX[0]), np.append(polyY, polyY[0]),
@@ -386,7 +386,7 @@ def run_analysis(image_path, out_dir=None):
 
     # --- Plot 7: Mask and distance transform visualization ---
     fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    axes[0].imshow(Iret, cmap='gray', vmin=0, vmax=max(vmax, 0.01))
+    axes[0].imshow(Iret, cmap='gray', vmin=0, vmax=retardance_ceiling_nm)
     axes[0].set_title('Retardance (nm)')
     axes[1].imshow(BW, cmap='gray')
     axes[1].set_title('Binary Mask')
