@@ -94,7 +94,9 @@ cacheForceRecalcEveryN  = 25;     % force full recalc every N frames (drift corr
 nThetaBins = 100;      % number of angular bins around contour
 
 % --- Output ---
-outDir = fullfile(base_dir, 'contour_retardance_out');
+% Output directory: defaults to a subfolder next to this script.
+% Change outDir to save results elsewhere (e.g. fullfile(base_dir, 'contour_retardance_out')).
+outDir = fullfile(fileparts(mfilename('fullpath')), 'contour_retardance_out');
 
 % --- Visualization ---
 saveOverlays     = true;    % save boundary overlay images
@@ -144,10 +146,22 @@ end
 fprintf('Found %d frames (mode: %s)\n', nFrames, inputMode);
 
 %% ========================== SETUP =========================================
-if ~exist(outDir, 'dir'); mkdir(outDir); end
+if ~exist(outDir, 'dir')
+    [status, msg] = mkdir(outDir);
+    if ~status
+        error('Could not create output directory "%s": %s', outDir, msg);
+    end
+end
+fprintf('Output directory: %s\n', outDir);
+
 if saveOverlays
     overlayDir = fullfile(outDir, 'overlays');
-    if ~exist(overlayDir, 'dir'); mkdir(overlayDir); end
+    if ~exist(overlayDir, 'dir')
+        [status, msg] = mkdir(overlayDir);
+        if ~status
+            error('Could not create overlay directory "%s": %s', overlayDir, msg);
+        end
+    end
 end
 
 um_per_px = 1 / px_per_um;
