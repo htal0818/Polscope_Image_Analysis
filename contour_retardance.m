@@ -80,7 +80,7 @@ radialStep_um  = 0.5;  % radial sampling step (microns)
 nAngleSamples  = 360;  % angular resolution for radial profiles
 
 % --- Outside-in radial profile parameters ---
-polyOrder      = 50;   % polynomial order for boundary fit in polar coords
+nFourier       = 25;   % number of Fourier harmonics for boundary fit
 nBoundaryPts   = 500;  % number of uniformly spaced boundary points
 maxDepth_um    = 50;   % how far inward from cortex to sample (microns)
 depthStep_um   = 0.5;  % step size along inward normals (microns)
@@ -353,55 +353,50 @@ for fr = 1:nFrames
     validR = profile_count > 0;
     radialProfiles(fr, validR) = profile_sum(validR) ./ profile_count(validR);
 
-    %% ----- Polynomial boundary fit (outside-in profiling) -----
-    % Convert raw boundary to polar coords relative to circle-fit center
+    %% ----- Fourier boundary fit (outside-in profiling) -----
+    % Fourier series is naturally periodic — no wrap-around artifacts
+    % and no Runge's phenomenon (unlike high-order polynomial fit).
     bnd_dx = xb - xc;  bnd_dy = yb - yc;
     bnd_r = sqrt(bnd_dx.^2 + bnd_dy.^2);
     bnd_theta = atan2(bnd_dy, bnd_dx);  % range [-pi, pi]
 
-    % Sort by angle for polynomial fitting
+    % Sort by angle for fitting
     [bnd_theta_sort, sIdx] = sort(bnd_theta);
     bnd_r_sort = bnd_r(sIdx);
 
-    % ---- Pass 1: fit r(theta) with polyOrder polynomial ----
-    % Wrap-pad to handle circular continuity at -pi/+pi
-    padN = round(numel(bnd_theta_sort) * 0.1);
-    theta_pad = [bnd_theta_sort(end-padN+1:end) - 2*pi; bnd_theta_sort; ...
-                 bnd_theta_sort(1:padN) + 2*pi];
-    r_pad = [bnd_r_sort(end-padN+1:end); bnd_r_sort; bnd_r_sort(1:padN)];
-    p1 = polyfit(theta_pad, r_pad, polyOrder);
+    % Build design matrix: r(theta) = a0 + sum_n [an*cos(n*theta) + bn*sin(n*theta)]
+    nPts_bnd = numel(bnd_theta_sort);
+    A_fourier = ones(nPts_bnd, 2*nFourier + 1);
+    for ni = 1:nFourier
+        A_fourier(:, 2*ni)   = cos(ni * bnd_theta_sort);
+        A_fourier(:, 2*ni+1) = sin(ni * bnd_theta_sort);
+    end
+    fourier_coeffs = A_fourier \ bnd_r_sort;
 
-    % ---- Pass 2: shift by pi and fit again for better wrap-around ----
-    bnd_theta2 = bnd_theta + pi;
-    bnd_theta2(bnd_theta2 > pi) = bnd_theta2(bnd_theta2 > pi) - 2*pi;
-    [bnd_theta2_sort, sIdx2] = sort(bnd_theta2);
-    bnd_r_sort2 = bnd_r(sIdx2);
-    theta_pad2 = [bnd_theta2_sort(end-padN+1:end) - 2*pi; bnd_theta2_sort; ...
-                  bnd_theta2_sort(1:padN) + 2*pi];
-    r_pad2 = [bnd_r_sort2(end-padN+1:end); bnd_r_sort2; bnd_r_sort2(1:padN)];
-    p2 = polyfit(theta_pad2, r_pad2, polyOrder);
-
-    % Evaluate both fits on uniform grid, average for smooth result
+    % Evaluate on uniform grid
     polyTheta = linspace(-pi, pi, nBoundaryPts+1);
     polyTheta(end) = [];
-    r_fit1 = polyval(p1, polyTheta);
-    r_fit2 = polyval(p2, polyTheta - pi);  % evaluate pass-2 at shifted angles
-    % Shift pass-2 indices to align with pass-1
-    halfN = round(nBoundaryPts/2);
-    r_fit2 = circshift(r_fit2, halfN);
-    polyR = (r_fit1 + r_fit2) / 2;
+    A_eval = ones(1, 2*nFourier + 1);
+    A_eval = repmat(A_eval, nBoundaryPts, 1);
+    A_eval(:,1) = 1;
+    for ni = 1:nFourier
+        A_eval(:, 2*ni)   = cos(ni * polyTheta(:));
+        A_eval(:, 2*ni+1) = sin(ni * polyTheta(:));
+    end
+    polyR = (A_eval * fourier_coeffs)';
 
     % Smooth boundary points in Cartesian
     polyX = xc + polyR .* cos(polyTheta);
     polyY = yc + polyR .* sin(polyTheta);
 
-    % ---- Compute inward-pointing normals from polynomial derivative ----
-    dp1 = polyder(p1);
-    dp2 = polyder(p2);
-    dr1 = polyval(dp1, polyTheta);
-    dr2 = polyval(dp2, polyTheta - pi);
-    dr2 = circshift(dr2, halfN);
-    drdtheta = (dr1 + dr2) / 2;
+    % ---- Analytic derivative dr/dtheta from Fourier coefficients ----
+    drdtheta = zeros(1, nBoundaryPts);
+    for ni = 1:nFourier
+        an = fourier_coeffs(2*ni);
+        bn = fourier_coeffs(2*ni+1);
+        drdtheta = drdtheta - ni * an * sin(ni * polyTheta) ...
+                             + ni * bn * cos(ni * polyTheta);
+    end
 
     % Tangent vector in Cartesian: d/dtheta [r*cos(theta), r*sin(theta)]
     tx = drdtheta .* cos(polyTheta) - polyR .* sin(polyTheta);
@@ -705,7 +700,7 @@ results.nThetaBins            = nThetaBins;
 results.nAngleSamples         = nAngleSamples;
 results.inputMode             = inputMode;
 results.thresholdMode         = thresholdMode;
-results.polyOrder             = polyOrder;
+results.nFourier              = nFourier;
 results.nBoundaryPts          = nBoundaryPts;
 results.maxDepth_um           = maxDepth_um;
 results.depthStep_um          = depthStep_um;
