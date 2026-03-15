@@ -92,9 +92,9 @@ def run_analysis(image_path, out_dir=None):
 
     # Morphological cleanup
     selem = morphology.disk(closeRadius)
-    BW = morphology.binary_closing(BW, selem)
+    BW = morphology.closing(BW, selem)
     BW = binary_fill_holes(BW)
-    BW = morphology.remove_small_objects(BW, min_size=minArea)
+    BW = morphology.remove_small_objects(BW, max_size=minArea - 1)
 
     # Fallback: gradient-based
     if not np.any(BW):
@@ -197,7 +197,8 @@ def run_analysis(image_path, out_dir=None):
     radialAxis_trim = radialAxis_um[:trimIdx]
     radialProfile_trim = radialProfile[:trimIdx]
 
-    # ---- Polynomial boundary fit (outside-in profiling) ----
+    # ---- Fourier boundary fit (outside-in profiling) ----
+    # Fourier series is naturally periodic — no wrap-around artifacts
     bnd_dx = xb_s - xc
     bnd_dy = yb_s - yc
     bnd_r = np.sqrt(bnd_dx**2 + bnd_dy**2)
@@ -207,47 +208,35 @@ def run_analysis(image_path, out_dir=None):
     bnd_theta_sort = bnd_theta[sIdx]
     bnd_r_sort = bnd_r[sIdx]
 
-    # Pass 1: fit r(theta) with wrap-padding
-    padN = max(1, round(len(bnd_theta_sort) * 0.1))
-    theta_pad = np.concatenate([bnd_theta_sort[-padN:] - 2*np.pi,
-                                 bnd_theta_sort,
-                                 bnd_theta_sort[:padN] + 2*np.pi])
-    r_pad = np.concatenate([bnd_r_sort[-padN:], bnd_r_sort, bnd_r_sort[:padN]])
-    # Use lower order for numerical stability with numpy
-    actual_order = min(polyOrder, len(theta_pad) // 3, 30)
-    p1 = np.polyfit(theta_pad, r_pad, actual_order)
-
-    # Pass 2: shift by pi
-    bnd_theta2 = bnd_theta + np.pi
-    bnd_theta2[bnd_theta2 > np.pi] -= 2*np.pi
-    sIdx2 = np.argsort(bnd_theta2)
-    bnd_theta2_sort = bnd_theta2[sIdx2]
-    bnd_r_sort2 = bnd_r[sIdx2]
-    theta_pad2 = np.concatenate([bnd_theta2_sort[-padN:] - 2*np.pi,
-                                  bnd_theta2_sort,
-                                  bnd_theta2_sort[:padN] + 2*np.pi])
-    r_pad2 = np.concatenate([bnd_r_sort2[-padN:], bnd_r_sort2, bnd_r_sort2[:padN]])
-    p2 = np.polyfit(theta_pad2, r_pad2, actual_order)
-
-    # Evaluate both fits on uniform grid, average
+    # Fit r(theta) as Fourier series: r = a0 + sum(an*cos(n*t) + bn*sin(n*t))
+    nFourier = min(polyOrder, 25)  # number of harmonics
     polyTheta = np.linspace(-np.pi, np.pi, nBoundaryPts, endpoint=False)
-    r_fit1 = np.polyval(p1, polyTheta)
-    r_fit2_raw = np.polyval(p2, polyTheta - np.pi)
-    halfN = nBoundaryPts // 2
-    r_fit2 = np.roll(r_fit2_raw, halfN)
-    polyR = (r_fit1 + r_fit2) / 2
+
+    # Build design matrix for least-squares Fourier fit
+    nPts = len(bnd_theta_sort)
+    A = np.ones((nPts, 2 * nFourier + 1))
+    for n in range(1, nFourier + 1):
+        A[:, 2*n - 1] = np.cos(n * bnd_theta_sort)
+        A[:, 2*n] = np.sin(n * bnd_theta_sort)
+    fourier_coeffs, _, _, _ = np.linalg.lstsq(A, bnd_r_sort, rcond=None)
+
+    # Evaluate on uniform grid
+    A_eval = np.ones((nBoundaryPts, 2 * nFourier + 1))
+    for n in range(1, nFourier + 1):
+        A_eval[:, 2*n - 1] = np.cos(n * polyTheta)
+        A_eval[:, 2*n] = np.sin(n * polyTheta)
+    polyR = A_eval @ fourier_coeffs
 
     polyX = xc + polyR * np.cos(polyTheta)
     polyY = yc + polyR * np.sin(polyTheta)
 
-    # Inward normals from polynomial derivative
-    dp1 = np.polyder(p1)
-    dp2 = np.polyder(p2)
-    dr1 = np.polyval(dp1, polyTheta)
-    dr2_raw = np.polyval(dp2, polyTheta - np.pi)
-    dr2 = np.roll(dr2_raw, halfN)
-    drdtheta = (dr1 + dr2) / 2
+    # Analytic derivative dr/dtheta from Fourier coefficients
+    drdtheta = np.zeros(nBoundaryPts)
+    for n in range(1, nFourier + 1):
+        drdtheta += -n * fourier_coeffs[2*n - 1] * np.sin(n * polyTheta) \
+                    + n * fourier_coeffs[2*n] * np.cos(n * polyTheta)
 
+    # Tangent and inward normal vectors
     tx = drdtheta * np.cos(polyTheta) - polyR * np.sin(polyTheta)
     ty = drdtheta * np.sin(polyTheta) + polyR * np.cos(polyTheta)
     tn = np.sqrt(tx**2 + ty**2)
@@ -263,7 +252,9 @@ def run_analysis(image_path, out_dir=None):
     ny[dot_check < 0] *= -1
 
     # ---- Normal-based outside-in profiles ----
-    depthAxis_um = np.arange(0, maxDepth_um + depthStep_um, depthStep_um)
+    # Cap depth at oocyte radius to prevent normals from crossing through center
+    effective_maxDepth_um = min(maxDepth_um, R_fit * um_per_px * 0.9)
+    depthAxis_um = np.arange(0, effective_maxDepth_um + depthStep_um, depthStep_um)
     nDepth = len(depthAxis_um)
     depthAxis_px = depthAxis_um / um_per_px
 
@@ -309,7 +300,8 @@ def run_analysis(image_path, out_dir=None):
     # --- Plot 1: Overlay ---
     fig, ax = plt.subplots(1, 1, figsize=(10, 8))
     vmax = np.percentile(Iret[Iret > 0], 99) if np.any(Iret > 0) else Iret.max()
-    ax.imshow(Iret, cmap='gray', vmin=0, vmax=max(vmax, 0.01), origin='upper')
+    im = ax.imshow(Iret, cmap='gray', vmin=0, vmax=max(vmax, 0.01),
+                   origin='upper', extent=[0, W, H, 0], aspect='equal')
     ax.plot(xb_s, yb_s, 'r-', linewidth=0.8, label='Boundary (shrunk)')
     ax.plot(np.append(polyX, polyX[0]), np.append(polyY, polyY[0]),
             'g-', linewidth=1.2, label='Polynomial fit')
@@ -326,9 +318,11 @@ def run_analysis(image_path, out_dir=None):
     ax.plot(xc + R_fit*np.cos(theta_circ), yc + R_fit*np.sin(theta_circ),
             'c--', linewidth=0.8, label=f'Circle fit (R={R_fit:.0f}px)')
     ax.plot(xc, yc, 'g+', markersize=12, markeredgewidth=2)
+    ax.set_xlim(0, W)
+    ax.set_ylim(H, 0)
     ax.set_title(f'Boundary Detection  |  R={R_fit:.0f}px = {R_fit*um_per_px:.1f}um')
     ax.legend(loc='upper right', fontsize=8)
-    plt.colorbar(ax.images[0], ax=ax, label='Retardance (nm)')
+    plt.colorbar(im, ax=ax, label='Retardance (nm)')
     fig.savefig(out_dir / 'overlay.png', dpi=200, bbox_inches='tight')
     plt.close(fig)
     print(f"Saved overlay to {out_dir / 'overlay.png'}")
@@ -411,7 +405,7 @@ def run_analysis(image_path, out_dir=None):
     print(f"Retardance ceiling: {retardance_ceiling_nm} nm ({bit_depth}-bit)")
     print(f"Contour retardance: {contourMean:.3f} +/- {contourStd:.3f} nm")
     print(f"  Range: {contourMin:.3f} – {contourMax:.3f} nm")
-    print(f"Polynomial fit order: {actual_order}")
+    print(f"Fourier harmonics: {nFourier}")
     print(f"Outputs saved to: {out_dir}")
     print(f"=============================")
 
