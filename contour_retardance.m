@@ -85,6 +85,11 @@ nBoundaryPts   = 500;  % number of uniformly spaced boundary points
 maxDepth_um    = 50;   % how far inward from cortex to sample (microns)
 depthStep_um   = 0.5;  % step size along inward normals (microns)
 
+% --- Mask caching (reuse mask between frames for speed) ---
+useMaskCaching          = true;   % master switch: false = recalculate every frame
+cacheIntensityThreshold = 0.02;   % reuse mask if mean intensity change < 2%
+cacheForceRecalcEveryN  = 25;     % force full recalc every N frames (drift correction)
+
 % --- Angular binning for kymograph ---
 nThetaBins = 100;      % number of angular bins around contour
 
@@ -194,8 +199,11 @@ distKymo = nan(nFrames, nDepth);
 centroidXY = nan(nFrames, 2);
 meanRadius_px = nan(nFrames, 1);
 
-% For fallback: previous frame's mask
-prevBW = [];
+% --- Cache state for smart mask reuse ---
+cache_prevBW      = [];    % previous binary mask
+cache_prevMeanInt = [];    % previous mean intensity inside mask
+cacheHitCount     = 0;     % diagnostic counter
+cacheRecalcCount  = 0;     % diagnostic counter
 
 %% ========================== MAIN LOOP =====================================
 fprintf('Processing %d frames...\n', nFrames);
@@ -213,59 +221,90 @@ for fr = 1:nFrames
     % Convert raw pixel values to retardance in nm
     Iret = (Iraw / maxPixVal) * retardance_ceiling_nm;
 
-    %% ----- Boundary detection -----
-    switch thresholdMode
-        case 'otsu'
-            % Heavy blur on raw image to wash out internal structure
-            I_blur = imgaussfilt(Iraw, sigmaBlur);
-            I_norm = I_blur / max(I_blur(:));
-            Totsu = graythresh(I_norm);
-            BW = I_norm > Totsu;
+    %% ----- Boundary detection (with smart mask caching) -----
 
-        case 'fixed'
-            % Direct threshold on raw pixel values
-            I_blur = imgaussfilt(Iraw, sigmaBlur);
-            BW = I_blur > fixedThreshold;
+    % Decide whether to recalculate or reuse previous mask
+    needsRecalc = true;
 
-        case 'percentile'
-            % Threshold at a percentile of the raw image intensity
-            I_blur = imgaussfilt(Iraw, sigmaBlur);
-            pVal = prctile(I_blur(:), percentileThreshold);
-            BW = I_blur > pVal;
+    if useMaskCaching && ~isempty(cache_prevBW)
+        if mod(fr, cacheForceRecalcEveryN) == 1
+            needsRecalc = true;   % forced drift correction
+        else
+            % Check intensity change inside previous mask
+            I_norm_check = Iraw / max(Iraw(:));
+            meanIntCurrent = mean(I_norm_check(cache_prevBW), 'omitnan');
+            intensityChange = abs(meanIntCurrent - cache_prevMeanInt) / (cache_prevMeanInt + eps);
 
-        otherwise
-            error('Unknown thresholdMode: %s', thresholdMode);
+            if intensityChange < cacheIntensityThreshold
+                needsRecalc = false;  % cache hit
+            end
+        end
     end
 
-    % Aggressive morphological cleanup
-    se = strel('disk', closeRadius);
-    BW = imclose(BW, se);
-    BW = imfill(BW, 'holes');
-    BW = bwareaopen(BW, minArea);
+    if needsRecalc || ~useMaskCaching
+        % --- FULL MASK RECALCULATION ---
+        switch thresholdMode
+            case 'otsu'
+                I_blur = imgaussfilt(Iraw, sigmaBlur);
+                I_norm = I_blur / max(I_blur(:));
+                Totsu = graythresh(I_norm);
+                BW = I_norm > Totsu;
 
-    % Fallback: gradient-based if Otsu fails
-    if ~any(BW(:))
-        [Gmag, ~] = imgradient(I_blur);
-        thrG = max(2*mean(Gmag(:)), prctile(Gmag(:), 80));
-        BW = Gmag >= thrG;
+            case 'fixed'
+                I_blur = imgaussfilt(Iraw, sigmaBlur);
+                BW = I_blur > fixedThreshold;
+
+            case 'percentile'
+                I_blur = imgaussfilt(Iraw, sigmaBlur);
+                pVal = prctile(I_blur(:), percentileThreshold);
+                BW = I_blur > pVal;
+
+            otherwise
+                error('Unknown thresholdMode: %s', thresholdMode);
+        end
+
+        % Aggressive morphological cleanup
+        se = strel('disk', closeRadius);
         BW = imclose(BW, se);
         BW = imfill(BW, 'holes');
         BW = bwareaopen(BW, minArea);
-    end
 
-    % Keep largest connected component (reuse previous mask on failure)
-    L = bwlabel(BW, 8);
-    if max(L(:)) >= 1
-        S = regionprops(L, 'Area', 'Centroid');
-        [~, iMax] = max([S.Area]);
-        BW = (L == iMax);
-    elseif ~isempty(prevBW)
-        BW = prevBW;
+        % Fallback: gradient-based if threshold fails
+        if ~any(BW(:))
+            [Gmag, ~] = imgradient(I_blur);
+            thrG = max(2*mean(Gmag(:)), prctile(Gmag(:), 80));
+            BW = Gmag >= thrG;
+            BW = imclose(BW, se);
+            BW = imfill(BW, 'holes');
+            BW = bwareaopen(BW, minArea);
+        end
+
+        % Keep largest connected component (fall back to cached mask on failure)
+        L = bwlabel(BW, 8);
+        if max(L(:)) >= 1
+            S = regionprops(L, 'Area', 'Centroid');
+            [~, iMax] = max([S.Area]);
+            BW = (L == iMax);
+        elseif ~isempty(cache_prevBW)
+            BW = cache_prevBW;
+        else
+            fprintf('  Frame %d: no boundary found, skipping.\n', fr);
+            continue;
+        end
+
+        % Update cache
+        if useMaskCaching
+            cache_prevBW = BW;
+            I_norm_cache = Iraw / max(Iraw(:));
+            cache_prevMeanInt = mean(I_norm_cache(BW), 'omitnan');
+        end
+        cacheRecalcCount = cacheRecalcCount + 1;
+
     else
-        fprintf('  Frame %d: no boundary found, skipping.\n', fr);
-        continue;
+        % --- CACHE REUSE (skip segmentation) ---
+        BW = cache_prevBW;
+        cacheHitCount = cacheHitCount + 1;
     end
-    prevBW = BW;
 
     %% ----- Extract boundary contour -----
     B = bwboundaries(BW);
@@ -720,5 +759,12 @@ fprintf('Median oocyte radius: %.1f um (%.0f px)\n', medianR_um, nanmedian(meanR
 fprintf('Retardance ceiling: %.0f nm (%d-bit)\n', retardance_ceiling_nm, bit_depth);
 fprintf('Mean contour retardance: %.2f +/- %.2f nm\n', ...
     mean(contourMean, 'omitnan'), std(contourMean, 'omitnan'));
+if useMaskCaching
+    totalCached = cacheHitCount + cacheRecalcCount;
+    if totalCached > 0
+        fprintf('Mask cache hits: %d / %d (%.1f%%)\n', ...
+            cacheHitCount, totalCached, 100*cacheHitCount/totalCached);
+    end
+end
 fprintf('Outputs saved to: %s\n', outDir);
 fprintf('=============================\n');
