@@ -19,7 +19,7 @@ from pathlib import Path
 # ========================== PARAMETERS ====================================
 retardance_ceiling_nm = 50
 bit_depth = 8           # will auto-detect from image dtype
-px_per_um = 6.25
+px_per_um = 6.25 / 2
 sigmaBlur = 20
 closeRadius = 25
 minArea = 5000
