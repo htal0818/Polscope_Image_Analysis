@@ -80,16 +80,23 @@ radialStep_um  = 0.5;  % radial sampling step (microns)
 nAngleSamples  = 360;  % angular resolution for radial profiles
 
 % --- Outside-in radial profile parameters ---
-polyOrder      = 50;   % polynomial order for boundary fit in polar coords
+nFourier       = 25;   % number of Fourier harmonics for boundary fit
 nBoundaryPts   = 500;  % number of uniformly spaced boundary points
 maxDepth_um    = 50;   % how far inward from cortex to sample (microns)
 depthStep_um   = 0.5;  % step size along inward normals (microns)
+
+% --- Mask caching (reuse mask between frames for speed) ---
+useMaskCaching          = true;   % master switch: false = recalculate every frame
+cacheIntensityThreshold = 0.02;   % reuse mask if mean intensity change < 2%
+cacheForceRecalcEveryN  = 25;     % force full recalc every N frames (drift correction)
 
 % --- Angular binning for kymograph ---
 nThetaBins = 100;      % number of angular bins around contour
 
 % --- Output ---
-outDir = fullfile(base_dir, 'contour_retardance_out');
+% Output directory: defaults to a subfolder next to this script.
+% Change outDir to save results elsewhere (e.g. fullfile(base_dir, 'contour_retardance_out')).
+outDir = fullfile(fileparts(mfilename('fullpath')), 'contour_retardance_out');
 
 % --- Visualization ---
 saveOverlays     = true;    % save boundary overlay images
@@ -139,10 +146,22 @@ end
 fprintf('Found %d frames (mode: %s)\n', nFrames, inputMode);
 
 %% ========================== SETUP =========================================
-if ~exist(outDir, 'dir'); mkdir(outDir); end
+if ~exist(outDir, 'dir')
+    [status, msg] = mkdir(outDir);
+    if ~status
+        error('Could not create output directory "%s": %s', outDir, msg);
+    end
+end
+fprintf('Output directory: %s\n', outDir);
+
 if saveOverlays
     overlayDir = fullfile(outDir, 'overlays');
-    if ~exist(overlayDir, 'dir'); mkdir(overlayDir); end
+    if ~exist(overlayDir, 'dir')
+        [status, msg] = mkdir(overlayDir);
+        if ~status
+            error('Could not create overlay directory "%s": %s', overlayDir, msg);
+        end
+    end
 end
 
 um_per_px = 1 / px_per_um;
@@ -194,8 +213,11 @@ distKymo = nan(nFrames, nDepth);
 centroidXY = nan(nFrames, 2);
 meanRadius_px = nan(nFrames, 1);
 
-% For fallback: previous frame's mask
-prevBW = [];
+% --- Cache state for smart mask reuse ---
+cache_prevBW      = [];    % previous binary mask
+cache_prevMeanInt = [];    % previous mean intensity inside mask
+cacheHitCount     = 0;     % diagnostic counter
+cacheRecalcCount  = 0;     % diagnostic counter
 
 %% ========================== MAIN LOOP =====================================
 fprintf('Processing %d frames...\n', nFrames);
@@ -213,57 +235,89 @@ for fr = 1:nFrames
     % Convert raw pixel values to retardance in nm
     Iret = (Iraw / maxPixVal) * retardance_ceiling_nm;
 
-    %% ----- Boundary detection -----
-    switch thresholdMode
-        case 'otsu'
-            % Heavy blur on raw image to wash out internal structure
-            I_blur = imgaussfilt(Iraw, sigmaBlur);
-            I_norm = I_blur / max(I_blur(:));
-            Totsu = graythresh(I_norm);
-            BW = I_norm > Totsu;
+    %% ----- Boundary detection (with smart mask caching) -----
 
-        case 'fixed'
-            % Direct threshold on raw pixel values
-            I_blur = imgaussfilt(Iraw, sigmaBlur);
-            BW = I_blur > fixedThreshold;
+    % Decide whether to recalculate or reuse previous mask
+    needsRecalc = true;
 
-        case 'percentile'
-            % Threshold at a percentile of the raw image intensity
-            I_blur = imgaussfilt(Iraw, sigmaBlur);
-            pVal = prctile(I_blur(:), percentileThreshold);
-            BW = I_blur > pVal;
+    if useMaskCaching && ~isempty(cache_prevBW)
+        if mod(fr, cacheForceRecalcEveryN) == 1
+            needsRecalc = true;   % forced drift correction
+        else
+            % Check intensity change inside previous mask
+            I_norm_check = Iraw / max(Iraw(:));
+            meanIntCurrent = mean(I_norm_check(cache_prevBW), 'omitnan');
+            intensityChange = abs(meanIntCurrent - cache_prevMeanInt) / (cache_prevMeanInt + eps);
 
-        otherwise
-            error('Unknown thresholdMode: %s', thresholdMode);
+            if intensityChange < cacheIntensityThreshold
+                needsRecalc = false;  % cache hit
+            end
+        end
     end
 
-    % Aggressive morphological cleanup
-    se = strel('disk', closeRadius);
-    BW = imclose(BW, se);
-    BW = imfill(BW, 'holes');
-    BW = bwareaopen(BW, minArea);
+    if needsRecalc || ~useMaskCaching
+        % --- FULL MASK RECALCULATION ---
+        switch thresholdMode
+            case 'otsu'
+                I_blur = imgaussfilt(Iraw, sigmaBlur);
+                I_norm = I_blur / max(I_blur(:));
+                Totsu = graythresh(I_norm);
+                BW = I_norm > Totsu;
 
-    % Fallback: gradient-based if Otsu fails
-    if ~any(BW(:))
-        [Gmag, ~] = imgradient(I_blur);
-        thrG = max(2*mean(Gmag(:)), prctile(Gmag(:), 80));
-        BW = Gmag >= thrG;
+            case 'fixed'
+                I_blur = imgaussfilt(Iraw, sigmaBlur);
+                BW = I_blur > fixedThreshold;
+
+            case 'percentile'
+                I_blur = imgaussfilt(Iraw, sigmaBlur);
+                pVal = prctile(I_blur(:), percentileThreshold);
+                BW = I_blur > pVal;
+
+            otherwise
+                error('Unknown thresholdMode: %s', thresholdMode);
+        end
+
+        % Aggressive morphological cleanup
+        se = strel('disk', closeRadius);
         BW = imclose(BW, se);
         BW = imfill(BW, 'holes');
         BW = bwareaopen(BW, minArea);
-    end
 
-    % Keep largest connected component (reuse previous mask on failure)
-    L = bwlabel(BW, 8);
-    if max(L(:)) >= 1
-        S = regionprops(L, 'Area', 'Centroid');
-        [~, iMax] = max([S.Area]);
-        BW = (L == iMax);
-    elseif ~isempty(prevBW)
-        BW = prevBW;
+        % Fallback: gradient-based if threshold fails
+        if ~any(BW(:))
+            [Gmag, ~] = imgradient(I_blur);
+            thrG = max(2*mean(Gmag(:)), prctile(Gmag(:), 80));
+            BW = Gmag >= thrG;
+            BW = imclose(BW, se);
+            BW = imfill(BW, 'holes');
+            BW = bwareaopen(BW, minArea);
+        end
+
+        % Keep largest connected component (fall back to cached mask on failure)
+        L = bwlabel(BW, 8);
+        if max(L(:)) >= 1
+            S = regionprops(L, 'Area', 'Centroid');
+            [~, iMax] = max([S.Area]);
+            BW = (L == iMax);
+        elseif ~isempty(cache_prevBW)
+            BW = cache_prevBW;
+        else
+            fprintf('  Frame %d: no boundary found, skipping.\n', fr);
+            continue;
+        end
+
+        % Update cache
+        if useMaskCaching
+            cache_prevBW = BW;
+            I_norm_cache = Iraw / max(Iraw(:));
+            cache_prevMeanInt = mean(I_norm_cache(BW), 'omitnan');
+        end
+        cacheRecalcCount = cacheRecalcCount + 1;
+
     else
-        fprintf('  Frame %d: no boundary found, skipping.\n', fr);
-        continue;
+        % --- CACHE REUSE (skip segmentation) ---
+        BW = cache_prevBW;
+        cacheHitCount = cacheHitCount + 1;
     end
     prevBW = BW;
 
@@ -353,55 +407,50 @@ for fr = 1:nFrames
     validR = profile_count > 0;
     radialProfiles(fr, validR) = profile_sum(validR) ./ profile_count(validR);
 
-    %% ----- Polynomial boundary fit (outside-in profiling) -----
-    % Convert raw boundary to polar coords relative to circle-fit center
+    %% ----- Fourier boundary fit (outside-in profiling) -----
+    % Fourier series is naturally periodic — no wrap-around artifacts
+    % and no Runge's phenomenon (unlike high-order polynomial fit).
     bnd_dx = xb - xc;  bnd_dy = yb - yc;
     bnd_r = sqrt(bnd_dx.^2 + bnd_dy.^2);
     bnd_theta = atan2(bnd_dy, bnd_dx);  % range [-pi, pi]
 
-    % Sort by angle for polynomial fitting
+    % Sort by angle for fitting
     [bnd_theta_sort, sIdx] = sort(bnd_theta);
     bnd_r_sort = bnd_r(sIdx);
 
-    % ---- Pass 1: fit r(theta) with polyOrder polynomial ----
-    % Wrap-pad to handle circular continuity at -pi/+pi
-    padN = round(numel(bnd_theta_sort) * 0.1);
-    theta_pad = [bnd_theta_sort(end-padN+1:end) - 2*pi; bnd_theta_sort; ...
-                 bnd_theta_sort(1:padN) + 2*pi];
-    r_pad = [bnd_r_sort(end-padN+1:end); bnd_r_sort; bnd_r_sort(1:padN)];
-    p1 = polyfit(theta_pad, r_pad, polyOrder);
+    % Build design matrix: r(theta) = a0 + sum_n [an*cos(n*theta) + bn*sin(n*theta)]
+    nPts_bnd = numel(bnd_theta_sort);
+    A_fourier = ones(nPts_bnd, 2*nFourier + 1);
+    for ni = 1:nFourier
+        A_fourier(:, 2*ni)   = cos(ni * bnd_theta_sort);
+        A_fourier(:, 2*ni+1) = sin(ni * bnd_theta_sort);
+    end
+    fourier_coeffs = A_fourier \ bnd_r_sort;
 
-    % ---- Pass 2: shift by pi and fit again for better wrap-around ----
-    bnd_theta2 = bnd_theta + pi;
-    bnd_theta2(bnd_theta2 > pi) = bnd_theta2(bnd_theta2 > pi) - 2*pi;
-    [bnd_theta2_sort, sIdx2] = sort(bnd_theta2);
-    bnd_r_sort2 = bnd_r(sIdx2);
-    theta_pad2 = [bnd_theta2_sort(end-padN+1:end) - 2*pi; bnd_theta2_sort; ...
-                  bnd_theta2_sort(1:padN) + 2*pi];
-    r_pad2 = [bnd_r_sort2(end-padN+1:end); bnd_r_sort2; bnd_r_sort2(1:padN)];
-    p2 = polyfit(theta_pad2, r_pad2, polyOrder);
-
-    % Evaluate both fits on uniform grid, average for smooth result
+    % Evaluate on uniform grid
     polyTheta = linspace(-pi, pi, nBoundaryPts+1);
     polyTheta(end) = [];
-    r_fit1 = polyval(p1, polyTheta);
-    r_fit2 = polyval(p2, polyTheta - pi);  % evaluate pass-2 at shifted angles
-    % Shift pass-2 indices to align with pass-1
-    halfN = round(nBoundaryPts/2);
-    r_fit2 = circshift(r_fit2, halfN);
-    polyR = (r_fit1 + r_fit2) / 2;
+    A_eval = ones(1, 2*nFourier + 1);
+    A_eval = repmat(A_eval, nBoundaryPts, 1);
+    A_eval(:,1) = 1;
+    for ni = 1:nFourier
+        A_eval(:, 2*ni)   = cos(ni * polyTheta(:));
+        A_eval(:, 2*ni+1) = sin(ni * polyTheta(:));
+    end
+    polyR = (A_eval * fourier_coeffs)';
 
     % Smooth boundary points in Cartesian
     polyX = xc + polyR .* cos(polyTheta);
     polyY = yc + polyR .* sin(polyTheta);
 
-    % ---- Compute inward-pointing normals from polynomial derivative ----
-    dp1 = polyder(p1);
-    dp2 = polyder(p2);
-    dr1 = polyval(dp1, polyTheta);
-    dr2 = polyval(dp2, polyTheta - pi);
-    dr2 = circshift(dr2, halfN);
-    drdtheta = (dr1 + dr2) / 2;
+    % ---- Analytic derivative dr/dtheta from Fourier coefficients ----
+    drdtheta = zeros(1, nBoundaryPts);
+    for ni = 1:nFourier
+        an = fourier_coeffs(2*ni);
+        bn = fourier_coeffs(2*ni+1);
+        drdtheta = drdtheta - ni * an * sin(ni * polyTheta) ...
+                             + ni * bn * cos(ni * polyTheta);
+    end
 
     % Tangent vector in Cartesian: d/dtheta [r*cos(theta), r*sin(theta)]
     tx = drdtheta .* cos(polyTheta) - polyR .* sin(polyTheta);
@@ -705,7 +754,7 @@ results.nThetaBins            = nThetaBins;
 results.nAngleSamples         = nAngleSamples;
 results.inputMode             = inputMode;
 results.thresholdMode         = thresholdMode;
-results.polyOrder             = polyOrder;
+results.nFourier              = nFourier;
 results.nBoundaryPts          = nBoundaryPts;
 results.maxDepth_um           = maxDepth_um;
 results.depthStep_um          = depthStep_um;
@@ -725,5 +774,12 @@ fprintf('Median oocyte radius: %.1f um (%.0f px)\n', medianR_um, nanmedian(meanR
 fprintf('Retardance ceiling: %.0f nm (%d-bit)\n', retardance_ceiling_nm, bit_depth);
 fprintf('Mean contour retardance: %.2f +/- %.2f nm\n', ...
     mean(contourMean, 'omitnan'), std(contourMean, 'omitnan'));
+if useMaskCaching
+    totalCached = cacheHitCount + cacheRecalcCount;
+    if totalCached > 0
+        fprintf('Mask cache hits: %d / %d (%.1f%%)\n', ...
+            cacheHitCount, totalCached, 100*cacheHitCount/totalCached);
+    end
+end
 fprintf('Outputs saved to: %s\n', outDir);
 fprintf('=============================\n');

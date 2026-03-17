@@ -1,0 +1,10 @@
+# Output directories
+contour_retardance_out/
+*_out/
+
+# Test images
+test_oocyte.png
+
+# MATLAB/Octave artifacts
+*.asv
+*.m~
