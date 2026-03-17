@@ -319,6 +319,7 @@ for fr = 1:nFrames
         BW = cache_prevBW;
         cacheHitCount = cacheHitCount + 1;
     end
+    prevBW = BW;
 
     %% ----- Extract boundary contour -----
     B = bwboundaries(BW);
