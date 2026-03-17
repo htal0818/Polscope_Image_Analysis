@@ -24,7 +24,6 @@
 %
 % REQUIREMENTS:
 %   - Image Processing Toolbox
-%   - measure_contour_retardance.m (shared segmentation/contour function)
 %   - circfit.m (included in this repository)
 
 clear all; close all; clc
@@ -204,52 +203,103 @@ tic;
 
 for fr = 1:nFrames
 
-    %% ----- Load image -----
+    %% ----- Load image and convert to retardance (nm) -----
     Iraw = readFrame(fr);
     if doCrop
         Iraw = imcrop(Iraw, cropRect);
     end
     [H, W] = size(Iraw);
 
-    %% ----- Segment oocyte & measure contour retardance -----
-    % Uses shared function (same pipeline as batch_distribution.m)
-    mcr_opts = struct( ...
-        'retardance_ceiling_nm', retardance_ceiling_nm, ...
-        'bit_depth',             bit_depth, ...
-        'sigmaBlur',             sigmaBlur, ...
-        'closeRadius',           closeRadius, ...
-        'minArea',               minArea, ...
-        'boundaryInset_px',      boundaryInset_px, ...
-        'thresholdMode',         thresholdMode, ...
-        'fixedThreshold',        fixedThreshold, ...
-        'percentileThreshold',   percentileThreshold, ...
-        'prevBW',                prevBW);
+    % Convert raw pixel values to retardance in nm
+    Iret = (Iraw / maxPixVal) * retardance_ceiling_nm;
 
-    res = measure_contour_retardance(Iraw, mcr_opts);
+    %% ----- Boundary detection -----
+    switch thresholdMode
+        case 'otsu'
+            % Heavy blur on raw image to wash out internal structure
+            I_blur = imgaussfilt(Iraw, sigmaBlur);
+            I_norm = I_blur / max(I_blur(:));
+            Totsu = graythresh(I_norm);
+            BW = I_norm > Totsu;
 
-    if ~res.success
-        fprintf('  Frame %d: boundary detection failed, skipping.\n', fr);
-        continue;
+        case 'fixed'
+            % Direct threshold on raw pixel values
+            I_blur = imgaussfilt(Iraw, sigmaBlur);
+            BW = I_blur > fixedThreshold;
+
+        case 'percentile'
+            % Threshold at a percentile of the raw image intensity
+            I_blur = imgaussfilt(Iraw, sigmaBlur);
+            pVal = prctile(I_blur(:), percentileThreshold);
+            BW = I_blur > pVal;
+
+        otherwise
+            error('Unknown thresholdMode: %s', thresholdMode);
     end
 
-    % Unpack shared results into local variables used by downstream code
-    Iret   = res.Iret;
-    BW     = res.BW;
-    xb     = res.xb;
-    yb     = res.yb;
-    xc     = res.xc;
-    yc     = res.yc;
-    R_fit  = res.R_fit;
-    ib     = res.contourValues;
+    % Aggressive morphological cleanup
+    se = strel('disk', closeRadius);
+    BW = imclose(BW, se);
+    BW = imfill(BW, 'holes');
+    BW = bwareaopen(BW, minArea);
+
+    % Fallback: gradient-based if Otsu fails
+    if ~any(BW(:))
+        [Gmag, ~] = imgradient(I_blur);
+        thrG = max(2*mean(Gmag(:)), prctile(Gmag(:), 80));
+        BW = Gmag >= thrG;
+        BW = imclose(BW, se);
+        BW = imfill(BW, 'holes');
+        BW = bwareaopen(BW, minArea);
+    end
+
+    % Keep largest connected component (reuse previous mask on failure)
+    L = bwlabel(BW, 8);
+    if max(L(:)) >= 1
+        S = regionprops(L, 'Area', 'Centroid');
+        [~, iMax] = max([S.Area]);
+        BW = (L == iMax);
+    elseif ~isempty(prevBW)
+        BW = prevBW;
+    else
+        fprintf('  Frame %d: no boundary found, skipping.\n', fr);
+        continue;
+    end
     prevBW = BW;
 
-    centroidXY(fr,:)  = [xc, yc];
+    %% ----- Extract boundary contour -----
+    B = bwboundaries(BW);
+    if isempty(B)
+        fprintf('  Frame %d: bwboundaries returned empty, skipping.\n', fr);
+        continue;
+    end
+    [~, iLongest] = max(cellfun(@(p) size(p,1), B));
+    bnd = B{iLongest};
+    yb = bnd(:,1);
+    xb = bnd(:,2);
+
+    %% ----- Circle fit for center & radius -----
+    [R_fit, xc, yc] = circfit(xb, yb);
+    centroidXY(fr,:) = [xc, yc];
     meanRadius_px(fr) = R_fit;
 
-    %% ----- Kymograph row (angular binning of contour retardance) -----
+    % Shrink boundary inward onto cortical ring center
+    dx = xb - xc;  dy = yb - yc;
+    dist = sqrt(dx.^2 + dy.^2);
+    shrink = max(dist - boundaryInset_px, 1) ./ dist;
+    xb = xc + dx .* shrink;
+    yb = yc + dy .* shrink;
+
+    %% ----- Retardance along the boundary (kymograph row) -----
+    % Angle of each boundary point relative to center
     th = atan2(yb - yc, xb - xc);
     th(th < 0) = th(th < 0) + 2*pi;
 
+    % Interpolate retardance (nm) at boundary pixel locations
+    F = griddedInterpolant({1:H, 1:W}, Iret, 'linear', 'nearest');
+    ib = F(yb, xb);  % retardance in nm at each boundary point
+
+    % Bin by angle
     bin = discretize(th, thetaBinEdges);
     valid = ~isnan(bin);
 
@@ -271,13 +321,12 @@ for fr = 1:nFrames
     kymo(fr,:) = row;
 
     %% ----- Contour retardance statistics (nm) -----
-    contourMean(fr) = res.contourMean;
-    contourStd(fr)  = res.contourStd;
-    contourMax(fr)  = res.contourMax;
-    contourMin(fr)  = res.contourMin;
+    contourMean(fr) = mean(ib, 'omitnan');
+    contourStd(fr)  = std(ib, 'omitnan');
+    contourMax(fr)  = max(ib);
+    contourMin(fr)  = min(ib);
 
     %% ----- Angle-averaged radial profile (center outward, in nm) -----
-    F = griddedInterpolant({1:H, 1:W}, Iret, 'linear', 'nearest');
     sampleAngles = linspace(0, 2*pi, nAngleSamples+1);
     sampleAngles(end) = [];
 
