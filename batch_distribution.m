@@ -206,25 +206,67 @@ exportgraphics(fig2, fullfile(outDir, 'contour_retardance_histogram_per_oocyte_m
 savefig(fig2, fullfile(outDir, 'contour_retardance_histogram_per_oocyte_mean.fig'));
 close(fig2);
 
-%% ========================== OVERLAY: PER-OOCYTE DISTRIBUTIONS ============
+%% ========================== PLOT 3: MEAN + INDIVIDUAL TRACES =============
+% Each oocyte as a thin gray line, population mean as a bold colored line
 fig3 = figure('Position', [100 100 900 550]);
-cmap = parula(nProcessed);
 hold on;
 
+% Normalize each oocyte to probability density so all eggs contribute equally
+perOocyteDensity = zeros(nProcessed, nBins);
 for oi = 1:nProcessed
-    [counts_i, ~] = histcounts(perOocyteContour{oi}, binEdges);
-    plot(binCenters, counts_i, '-', 'Color', [cmap(oi,:) 0.6], 'LineWidth', 1.2);
+    [counts_i, ~] = histcounts(perOocyteContour{oi}, binEdges, 'Normalization', 'probability');
+    perOocyteDensity(oi,:) = counts_i;
+    plot(binCenters, counts_i, '-', 'Color', [0.6 0.6 0.6 0.35], 'LineWidth', 0.8);
 end
 
+% Population mean + SD band
+meanDensity = mean(perOocyteDensity, 1);
+sdDensity   = std(perOocyteDensity, 0, 1);
+
+fill([binCenters fliplr(binCenters)], ...
+     [meanDensity + sdDensity, fliplr(meanDensity - sdDensity)], ...
+     [0.2 0.4 0.8], 'FaceAlpha', 0.25, 'EdgeColor', 'none');
+plot(binCenters, meanDensity, '-', 'Color', [0.2 0.4 0.8], 'LineWidth', 2.5);
+
 xlabel('Contour Retardance (nm)', 'FontSize', 13);
-ylabel('Counts', 'FontSize', 13);
-title(sprintf('Per-Oocyte Contour Retardance — %d Oocytes', nProcessed), 'FontSize', 15);
+ylabel('Fraction of Contour', 'FontSize', 13);
+title(sprintf('Per-Oocyte Contour Distributions — %d Oocytes', nProcessed), 'FontSize', 15);
+legend({'Individual oocytes', '\pm1 SD', 'Population mean'}, ...
+    'Location', 'northeast', 'FontSize', 10);
 set(gca, 'FontSize', 11);
 grid on; box on;
 
-exportgraphics(fig3, fullfile(outDir, 'contour_retardance_overlay_per_oocyte.png'), 'Resolution', 200);
-savefig(fig3, fullfile(outDir, 'contour_retardance_overlay_per_oocyte.fig'));
+exportgraphics(fig3, fullfile(outDir, 'contour_retardance_mean_traces.png'), 'Resolution', 200);
+savefig(fig3, fullfile(outDir, 'contour_retardance_mean_traces.fig'));
 close(fig3);
+
+%% ========================== PLOT 4: HEATMAP (oocyte x retardance) ========
+% Each row is one oocyte's contour distribution, sorted by mean retardance
+fig4 = figure('Position', [100 100 900 600]);
+
+[~, sortOrder] = sort(oocyteMean);
+sortedDensity  = perOocyteDensity(sortOrder, :);
+sortedNames    = oocyteNames(sortOrder);
+
+imagesc(binCenters, 1:nProcessed, sortedDensity);
+set(gca, 'YDir', 'normal');
+colormap parula; cb = colorbar;
+cb.Label.String = 'Fraction of Contour';
+cb.Label.FontSize = 11;
+
+xlabel('Contour Retardance (nm)', 'FontSize', 13);
+ylabel('Oocyte (sorted by mean retardance)', 'FontSize', 13);
+title(sprintf('Contour Retardance Heatmap — %d Oocytes', nProcessed), 'FontSize', 15);
+set(gca, 'FontSize', 11);
+
+% Label y-axis with oocyte names if <= 30, otherwise use numbers
+if nProcessed <= 30
+    set(gca, 'YTick', 1:nProcessed, 'YTickLabel', sortedNames, 'FontSize', 7);
+end
+
+exportgraphics(fig4, fullfile(outDir, 'contour_retardance_heatmap.png'), 'Resolution', 200);
+savefig(fig4, fullfile(outDir, 'contour_retardance_heatmap.fig'));
+close(fig4);
 
 %% ========================== SAVE DATA ====================================
 results = struct();
