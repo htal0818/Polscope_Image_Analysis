@@ -1,14 +1,17 @@
 % batch_distribution.m
-% Batch retardance histogram across many oocytes from static PolScope snapshots.
+% Batch CONTOUR retardance histogram across many oocytes from static PolScope snapshots.
 %
 % This script:
 %   1. Scans a parent directory for all subfolders containing 'SM' in the name
 %   2. Inside each SM folder, looks for a 'Pos0' subfolder
 %   3. Loads the first retardance image from Pos0
-%   4. Detects the oocyte boundary (same approach as contour_retardance.m)
-%   5. Extracts retardance values within the oocyte mask
-%   6. Pools all oocyte retardance values and produces a histogram of
-%      retardance (nm) vs counts across the entire dataset
+%   4. Calls measure_contour_retardance() to detect the oocyte boundary
+%      and sample retardance (nm) along the cortical contour
+%   5. Pools contour retardance values across all oocytes and produces
+%      a histogram of retardance (nm) vs counts
+%
+% Uses the same segmentation + contour measurement pipeline as
+% contour_retardance.m via the shared function measure_contour_retardance().
 %
 % Expected folder structure:
 %   parent_dir/
@@ -18,7 +21,8 @@
 %
 % REQUIREMENTS:
 %   - Image Processing Toolbox
-%   - circfit.m (included in this repository)
+%   - measure_contour_retardance.m (in this repository)
+%   - circfit.m (in this repository)
 
 clear all; close all; clc
 
@@ -30,25 +34,21 @@ parent_dir = '/path/to/your/data/';
 % --- File pattern for retardance images inside Pos0 ---
 retardance_pattern = '*Retardance*';
 
-% --- Retardance calibration ---
-retardance_ceiling_nm = 50;   % Polscope retardance ceiling (nm)
-bit_depth = 16;               % image bit depth (16-bit = 0..65535)
+% --- Options passed to measure_contour_retardance() ---
+% (see measure_contour_retardance.m for full list and defaults)
+opts = struct();
+opts.retardance_ceiling_nm = 50;    % Polscope retardance ceiling (nm)
+opts.bit_depth             = 16;    % image bit depth (16-bit = 0..65535)
+opts.sigmaBlur             = 20;    % Gaussian blur sigma (px) for segmentation
+opts.closeRadius           = 25;    % morphological close disk radius (px)
+opts.minArea               = 5000;  % minimum object area (px^2) to reject debris
+opts.boundaryInset_px      = 10;    % shift boundary inward onto cortex
+opts.thresholdMode         = 'otsu';
+opts.fixedThreshold        = 500;
+opts.percentileThreshold   = 30;
 
 % --- Spatial calibration ---
 px_per_um = 6.25;             % pixels per micron (adjust for your objective)
-
-% --- Boundary detection parameters (from contour_retardance.m) ---
-sigmaBlur   = 20;             % Gaussian blur sigma (px) for segmentation
-closeRadius = 25;             % morphological close disk radius (px)
-minArea     = 5000;           % minimum object area (px^2) to reject debris
-
-% --- Threshold mode ---
-% 'otsu'       : automatic Otsu threshold on blurred image (default)
-% 'fixed'      : fixed intensity threshold on blurred image
-% 'percentile' : threshold at a percentile of blurred image intensity
-thresholdMode       = 'otsu';
-fixedThreshold      = 500;
-percentileThreshold = 30;
 
 % --- Histogram parameters ---
 nBins       = 100;            % number of histogram bins
@@ -77,19 +77,22 @@ fprintf('Found %d SM folders in:\n  %s\n\n', numel(smDirs), parent_dir);
 %% ========================== SETUP ========================================
 if ~exist(outDir, 'dir'); mkdir(outDir); end
 
-maxPixVal = 2^bit_depth - 1;  % 65535 for 16-bit
 um_per_px = 1 / px_per_um;
 
-% Pooled retardance values across all oocytes
-allRetardance = [];
+% Pooled contour retardance values across all oocytes
+allContourRet = [];
 
 % Per-oocyte summary statistics
-oocyteNames  = {};
-oocyteMean   = [];
-oocyteMedian = [];
-oocyteStd    = [];
-oocyteMax    = [];
-oocyteArea_um2 = [];
+oocyteNames    = {};
+oocyteMean     = [];
+oocyteMedian   = [];
+oocyteStd      = [];
+oocyteMax      = [];
+oocyteMin      = [];
+oocyteR_um     = [];   % circle-fit radius per oocyte
+
+% Store per-oocyte contour values for overlay plot
+perOocyteContour = {};
 
 nProcessed = 0;
 nSkipped   = 0;
@@ -123,79 +126,35 @@ for si = 1:numel(smDirs)
     d = d(sortIdx);
     imgPath = fullfile(d(1).folder, d(1).name);
 
-    %% ----- Load image and convert to retardance (nm) -----
+    % Load image
     Iraw = double(imread(imgPath));
-    [H, W] = size(Iraw);
 
-    % Convert raw pixel values to retardance in nm
-    Iret = (Iraw / maxPixVal) * retardance_ceiling_nm;
+    % Call the shared contour measurement function
+    res = measure_contour_retardance(Iraw, opts);
 
-    %% ----- Boundary detection (from contour_retardance.m) -----
-    switch thresholdMode
-        case 'otsu'
-            I_blur = imgaussfilt(Iraw, sigmaBlur);
-            I_norm = I_blur / max(I_blur(:));
-            Totsu  = graythresh(I_norm);
-            BW     = I_norm > Totsu;
-
-        case 'fixed'
-            I_blur = imgaussfilt(Iraw, sigmaBlur);
-            BW     = I_blur > fixedThreshold;
-
-        case 'percentile'
-            I_blur = imgaussfilt(Iraw, sigmaBlur);
-            pVal   = prctile(I_blur(:), percentileThreshold);
-            BW     = I_blur > pVal;
-
-        otherwise
-            error('Unknown thresholdMode: %s', thresholdMode);
-    end
-
-    % Morphological cleanup
-    se = strel('disk', closeRadius);
-    BW = imclose(BW, se);
-    BW = imfill(BW, 'holes');
-    BW = bwareaopen(BW, minArea);
-
-    % Fallback: gradient-based if Otsu fails
-    if ~any(BW(:))
-        [Gmag, ~] = imgradient(I_blur);
-        thrG = max(2*mean(Gmag(:)), prctile(Gmag(:), 80));
-        BW = Gmag >= thrG;
-        BW = imclose(BW, se);
-        BW = imfill(BW, 'holes');
-        BW = bwareaopen(BW, minArea);
-    end
-
-    % Keep largest connected component
-    L = bwlabel(BW, 8);
-    if max(L(:)) >= 1
-        S = regionprops(L, 'Area');
-        [~, iMax] = max([S.Area]);
-        BW = (L == iMax);
-    else
+    if ~res.success
         fprintf('  [SKIP] %s — boundary detection failed\n', smName);
         nSkipped = nSkipped + 1;
         continue;
     end
 
-    %% ----- Extract retardance values within the oocyte -----
-    retVals = Iret(BW);
-
-    % Pool into the combined dataset
-    allRetardance = [allRetardance; retVals(:)];
+    % Pool contour values into the combined dataset
+    cv = res.contourValues;
+    allContourRet = [allContourRet; cv(:)];
 
     % Per-oocyte statistics
     nProcessed = nProcessed + 1;
-    oocyteNames{nProcessed}    = smName;
-    oocyteMean(nProcessed)     = mean(retVals);
-    oocyteMedian(nProcessed)   = median(retVals);
-    oocyteStd(nProcessed)      = std(retVals);
-    oocyteMax(nProcessed)      = max(retVals);
-    oocyteArea_um2(nProcessed) = sum(BW(:)) * um_per_px^2;
+    oocyteNames{nProcessed}      = smName;
+    oocyteMean(nProcessed)        = res.contourMean;
+    oocyteMedian(nProcessed)      = median(cv);
+    oocyteStd(nProcessed)         = res.contourStd;
+    oocyteMax(nProcessed)         = res.contourMax;
+    oocyteMin(nProcessed)         = res.contourMin;
+    oocyteR_um(nProcessed)        = res.R_fit * um_per_px;
+    perOocyteContour{nProcessed}  = cv;
 
-    fprintf('  [OK]   %s — %s — mean=%.2f nm, median=%.2f nm, %d px\n', ...
-        smName, d(1).name, oocyteMean(nProcessed), oocyteMedian(nProcessed), numel(retVals));
+    fprintf('  [OK]   %s — %s — contour mean=%.2f nm, R=%.0f um, %d pts\n', ...
+        smName, d(1).name, res.contourMean, oocyteR_um(nProcessed), numel(cv));
 end
 
 elapsed = toc;
@@ -206,45 +165,45 @@ if nProcessed == 0
     error('No oocytes were successfully processed. Check your parent_dir and folder structure.');
 end
 
-%% ========================== HISTOGRAM: Retardance vs Counts ==============
-binEdges = linspace(0, maxRet_nm, nBins + 1);
+%% ========================== HISTOGRAM: Contour Retardance vs Counts ======
+binEdges   = linspace(0, maxRet_nm, nBins + 1);
 binCenters = (binEdges(1:end-1) + binEdges(2:end)) / 2;
 
+grandMean   = mean(allContourRet);
+grandMedian = median(allContourRet);
+grandStd    = std(allContourRet);
+
 fig1 = figure('Position', [100 100 900 550]);
-histogram(allRetardance, binEdges, ...
+histogram(allContourRet, binEdges, ...
     'FaceColor', [0.2 0.4 0.8], 'EdgeColor', 'w', 'FaceAlpha', 0.85);
-xlabel('Retardance (nm)', 'FontSize', 13);
+xlabel('Contour Retardance (nm)', 'FontSize', 13);
 ylabel('Counts', 'FontSize', 13);
-title(sprintf('Retardance Distribution — %d Oocytes', nProcessed), 'FontSize', 15);
+title(sprintf('Contour Retardance Distribution — %d Oocytes', nProcessed), 'FontSize', 15);
 set(gca, 'FontSize', 11);
 grid on; box on;
 
-% Add summary stats annotation
-grandMean   = mean(allRetardance);
-grandMedian = median(allRetardance);
-grandStd    = std(allRetardance);
 annotation('textbox', [0.62, 0.72, 0.25, 0.15], ...
     'String', sprintf('n = %d oocytes\nMean = %.2f nm\nMedian = %.2f nm\nSD = %.2f nm', ...
         nProcessed, grandMean, grandMedian, grandStd), ...
     'FontSize', 10, 'BackgroundColor', 'w', 'EdgeColor', 'k', ...
     'FitBoxToText', 'on');
 
-exportgraphics(fig1, fullfile(outDir, 'retardance_histogram_all.png'), 'Resolution', 200);
-savefig(fig1, fullfile(outDir, 'retardance_histogram_all.fig'));
+exportgraphics(fig1, fullfile(outDir, 'contour_retardance_histogram_all.png'), 'Resolution', 200);
+savefig(fig1, fullfile(outDir, 'contour_retardance_histogram_all.fig'));
 close(fig1);
 
 %% ========================== PER-OOCYTE MEAN HISTOGRAM ====================
 fig2 = figure('Position', [100 100 900 550]);
 histogram(oocyteMean, 20, ...
     'FaceColor', [0.8 0.3 0.2], 'EdgeColor', 'w', 'FaceAlpha', 0.85);
-xlabel('Mean Retardance per Oocyte (nm)', 'FontSize', 13);
+xlabel('Mean Contour Retardance per Oocyte (nm)', 'FontSize', 13);
 ylabel('Number of Oocytes', 'FontSize', 13);
-title(sprintf('Distribution of Mean Retardance — %d Oocytes', nProcessed), 'FontSize', 15);
+title(sprintf('Distribution of Mean Contour Retardance — %d Oocytes', nProcessed), 'FontSize', 15);
 set(gca, 'FontSize', 11);
 grid on; box on;
 
-exportgraphics(fig2, fullfile(outDir, 'retardance_histogram_per_oocyte_mean.png'), 'Resolution', 200);
-savefig(fig2, fullfile(outDir, 'retardance_histogram_per_oocyte_mean.fig'));
+exportgraphics(fig2, fullfile(outDir, 'contour_retardance_histogram_per_oocyte_mean.png'), 'Resolution', 200);
+savefig(fig2, fullfile(outDir, 'contour_retardance_histogram_per_oocyte_mean.fig'));
 close(fig2);
 
 %% ========================== OVERLAY: PER-OOCYTE DISTRIBUTIONS ============
@@ -253,76 +212,42 @@ cmap = parula(nProcessed);
 hold on;
 
 for oi = 1:nProcessed
-    pos0Dir = fullfile(parent_dir, oocyteNames{oi}, 'Pos0');
-    d = dir(fullfile(pos0Dir, retardance_pattern));
-    [~, sortIdx] = sort({d.name});
-    d = d(sortIdx);
-    imgPath = fullfile(d(1).folder, d(1).name);
-    Iraw = double(imread(imgPath));
-    Iret_i = (Iraw / maxPixVal) * retardance_ceiling_nm;
-
-    % Re-segment to get mask
-    switch thresholdMode
-        case 'otsu'
-            I_blur = imgaussfilt(Iraw, sigmaBlur);
-            I_norm = I_blur / max(I_blur(:));
-            BW = I_norm > graythresh(I_norm);
-        case 'fixed'
-            I_blur = imgaussfilt(Iraw, sigmaBlur);
-            BW = I_blur > fixedThreshold;
-        case 'percentile'
-            I_blur = imgaussfilt(Iraw, sigmaBlur);
-            BW = I_blur > prctile(I_blur(:), percentileThreshold);
-    end
-    se = strel('disk', closeRadius);
-    BW = imclose(BW, se);
-    BW = imfill(BW, 'holes');
-    BW = bwareaopen(BW, minArea);
-    L = bwlabel(BW, 8);
-    if max(L(:)) >= 1
-        S = regionprops(L, 'Area');
-        [~, iMax] = max([S.Area]);
-        BW = (L == iMax);
-    end
-
-    retVals_i = Iret_i(BW);
-    [counts_i, ~] = histcounts(retVals_i, binEdges);
+    [counts_i, ~] = histcounts(perOocyteContour{oi}, binEdges);
     plot(binCenters, counts_i, '-', 'Color', [cmap(oi,:) 0.6], 'LineWidth', 1.2);
 end
 
-xlabel('Retardance (nm)', 'FontSize', 13);
+xlabel('Contour Retardance (nm)', 'FontSize', 13);
 ylabel('Counts', 'FontSize', 13);
-title(sprintf('Per-Oocyte Retardance Distributions — %d Oocytes', nProcessed), 'FontSize', 15);
+title(sprintf('Per-Oocyte Contour Retardance — %d Oocytes', nProcessed), 'FontSize', 15);
 set(gca, 'FontSize', 11);
 grid on; box on;
 
-exportgraphics(fig3, fullfile(outDir, 'retardance_overlay_per_oocyte.png'), 'Resolution', 200);
-savefig(fig3, fullfile(outDir, 'retardance_overlay_per_oocyte.fig'));
+exportgraphics(fig3, fullfile(outDir, 'contour_retardance_overlay_per_oocyte.png'), 'Resolution', 200);
+savefig(fig3, fullfile(outDir, 'contour_retardance_overlay_per_oocyte.fig'));
 close(fig3);
 
 %% ========================== SAVE DATA ====================================
 results = struct();
-results.allRetardance         = allRetardance;
+results.allContourRet         = allContourRet;
+results.perOocyteContour      = {perOocyteContour};
 results.oocyteNames           = oocyteNames;
 results.oocyteMean_nm         = oocyteMean;
 results.oocyteMedian_nm       = oocyteMedian;
 results.oocyteStd_nm          = oocyteStd;
 results.oocyteMax_nm          = oocyteMax;
-results.oocyteArea_um2        = oocyteArea_um2;
+results.oocyteMin_nm          = oocyteMin;
+results.oocyteR_um            = oocyteR_um;
 results.nProcessed            = nProcessed;
 results.nSkipped              = nSkipped;
 results.grandMean_nm          = grandMean;
 results.grandMedian_nm        = grandMedian;
 results.grandStd_nm           = grandStd;
-results.retardance_ceiling_nm = retardance_ceiling_nm;
-results.bit_depth             = bit_depth;
+results.retardance_ceiling_nm = opts.retardance_ceiling_nm;
+results.bit_depth             = opts.bit_depth;
 results.px_per_um             = px_per_um;
 results.binEdges_nm           = binEdges;
 results.binCenters_nm         = binCenters;
-results.thresholdMode         = thresholdMode;
-results.sigmaBlur             = sigmaBlur;
-results.closeRadius           = closeRadius;
-results.minArea               = minArea;
+results.opts                  = opts;
 results.parent_dir            = parent_dir;
 
 save(fullfile(outDir, 'batch_retardance_results.mat'), '-struct', 'results');
@@ -330,17 +255,17 @@ fprintf('Saved results to: %s\n', fullfile(outDir, 'batch_retardance_results.mat
 
 %% ========================== SUMMARY TABLE ================================
 fprintf('\n==================== OOCYTE SUMMARY ====================\n');
-fprintf('%-40s %8s %8s %8s %8s\n', 'Oocyte', 'Mean', 'Median', 'SD', 'Max');
-fprintf('%-40s %8s %8s %8s %8s\n', '', '(nm)', '(nm)', '(nm)', '(nm)');
-fprintf('%s\n', repmat('-', 1, 72));
+fprintf('%-40s %8s %8s %8s %8s %8s\n', 'Oocyte', 'Mean', 'Median', 'SD', 'Max', 'R(um)');
+fprintf('%-40s %8s %8s %8s %8s %8s\n', '', '(nm)', '(nm)', '(nm)', '(nm)', '');
+fprintf('%s\n', repmat('-', 1, 80));
 for oi = 1:nProcessed
-    fprintf('%-40s %8.2f %8.2f %8.2f %8.2f\n', ...
+    fprintf('%-40s %8.2f %8.2f %8.2f %8.2f %8.1f\n', ...
         oocyteNames{oi}, oocyteMean(oi), oocyteMedian(oi), ...
-        oocyteStd(oi), oocyteMax(oi));
+        oocyteStd(oi), oocyteMax(oi), oocyteR_um(oi));
 end
-fprintf('%s\n', repmat('-', 1, 72));
+fprintf('%s\n', repmat('-', 1, 80));
 fprintf('%-40s %8.2f %8.2f %8.2f %8.2f\n', ...
     sprintf('GRAND TOTAL (%d oocytes)', nProcessed), ...
-    grandMean, grandMedian, grandStd, max(allRetardance));
+    grandMean, grandMedian, grandStd, max(allContourRet));
 fprintf('========================================================\n');
 fprintf('\nOutputs saved to: %s\n', outDir);
