@@ -181,8 +181,10 @@ radialAxis_um = 0 : radialStep_um : maxRadius_um;
 nRadial = numel(radialAxis_um);
 radialAxis_px = radialAxis_um / um_per_px;
 
-% Depth axis (outside-in: 0 = cortex, increasing = deeper into oocyte)
-depthAxis_um = 0 : depthStep_um : maxDepth_um;
+% Depth axis (outside-in: negative = outward toward cortex, positive = deeper)
+% Extend outward by the boundary inset so normals capture the cortical peak
+outward_um = boundaryInset_px / px_per_um + 2;  % extra 2 um beyond inset
+depthAxis_um = -outward_um : depthStep_um : maxDepth_um;
 nDepth = numel(depthAxis_um);
 depthAxis_px = depthAxis_um / um_per_px;
 
