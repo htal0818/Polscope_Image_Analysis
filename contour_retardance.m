@@ -150,8 +150,16 @@ end
 fprintf('Found %d frames (mode: %s)\n', nFrames, inputMode);
 
 % --- Load State1 images for mask generation (if specified) ---
-useState1Mask = ~isempty(state1_pattern);
-if useState1Mask
+% In four_state mode, State1 is automatically used for segmentation.
+if strcmp(inputMode, 'four_state')
+    % State1 already loaded as ds{1} — use it directly
+    useState1Mask = true;
+    nState1 = numel(ds{1});
+    readState1 = @(t) double(imread(fullfile(ds{1}(t).folder, ds{1}(t).name)));
+    fprintf('Using State1 images for segmentation (four_state mode, %d files)\n', nState1);
+elseif ~isempty(state1_pattern)
+    % Retardance mode with explicit State1 pattern
+    useState1Mask = true;
     ds1 = dir(fullfile(base_dir, state1_pattern));
     if isempty(ds1)
         warning('No State1 images found matching "%s" — falling back to retardance for segmentation.', state1_pattern);
@@ -166,6 +174,8 @@ if useState1Mask
         readState1 = @(t) double(imread(fullfile(ds1(t).folder, ds1(t).name)));
         fprintf('Using State1 images for segmentation (%d files)\n', nState1);
     end
+else
+    useState1Mask = false;
 end
 
 %% ========================== SETUP =========================================
