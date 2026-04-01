@@ -40,6 +40,11 @@ inputMode = 'retardance';
 base_dir = '/path/to/your/data/Pos0/';
 retardance_pattern = '*1_Retardance*';
 
+% --- Mask source: use State1 images for segmentation (sharper boundary,
+%     more stable intensity than retardance). Leave empty to segment from
+%     the retardance images themselves. ---
+state1_pattern = '';  % e.g. '*State1*' — set to '' to disable
+
 % --- For 'four_state' mode: folder with State1..State4 images ---
 % (uses base_dir above)
 % state_patterns = {'*State1*', '*State2*', '*State3*', '*State4*'};
@@ -144,6 +149,25 @@ end
 
 fprintf('Found %d frames (mode: %s)\n', nFrames, inputMode);
 
+% --- Load State1 images for mask generation (if specified) ---
+useState1Mask = ~isempty(state1_pattern);
+if useState1Mask
+    ds1 = dir(fullfile(base_dir, state1_pattern));
+    if isempty(ds1)
+        warning('No State1 images found matching "%s" — falling back to retardance for segmentation.', state1_pattern);
+        useState1Mask = false;
+    else
+        [~, s1Idx] = sort({ds1.name});
+        ds1 = ds1(s1Idx);
+        nState1 = numel(ds1);
+        if nState1 < nFrames
+            warning('Only %d State1 images for %d frames — extra frames will use retardance segmentation.', nState1, nFrames);
+        end
+        readState1 = @(t) double(imread(fullfile(ds1(t).folder, ds1(t).name)));
+        fprintf('Using State1 images for segmentation (%d files)\n', nState1);
+    end
+end
+
 %% ========================== SETUP =========================================
 if ~exist(outDir, 'dir')
     [status, msg] = mkdir(outDir);
@@ -236,6 +260,16 @@ for fr = 1:nFrames
 
     %% ----- Boundary detection (with smart mask caching) -----
 
+    % Choose segmentation source: State1 (if available) or retardance
+    if useState1Mask && fr <= nState1
+        Iseg = readState1(fr);
+        if doCrop; Iseg = imcrop(Iseg, cropRect); end
+        segFromState1 = true;
+    else
+        Iseg = Iraw;
+        segFromState1 = false;
+    end
+
     % Decide whether to recalculate or reuse previous mask
     needsRecalc = true;
 
@@ -244,7 +278,7 @@ for fr = 1:nFrames
             needsRecalc = true;   % forced drift correction
         else
             % Check intensity change inside previous mask
-            I_norm_check = Iraw / max(Iraw(:));
+            I_norm_check = Iseg / max(Iseg(:));
             meanIntCurrent = mean(I_norm_check(cache_prevBW), 'omitnan');
             intensityChange = abs(meanIntCurrent - cache_prevMeanInt) / (cache_prevMeanInt + eps);
 
@@ -256,24 +290,31 @@ for fr = 1:nFrames
 
     if needsRecalc || ~useMaskCaching
         % --- FULL MASK RECALCULATION ---
-        switch thresholdMode
-            case 'otsu'
-                I_blur = imgaussfilt(Iraw, sigmaBlur);
-                I_norm = I_blur / max(I_blur(:));
-                Totsu = graythresh(I_norm);
-                BW = I_norm > Totsu;
+        I_blur = imgaussfilt(Iseg, sigmaBlur);
 
-            case 'fixed'
-                I_blur = imgaussfilt(Iraw, sigmaBlur);
-                BW = I_blur > fixedThreshold;
+        if segFromState1
+            % State1: oocyte is DARK on lighter background → invert threshold
+            I_norm = I_blur / max(I_blur(:));
+            Totsu = graythresh(I_norm);
+            BW = I_norm < Totsu;   % inverted: oocyte is below threshold
+        else
+            % Retardance: oocyte cortex is BRIGHT → standard threshold
+            switch thresholdMode
+                case 'otsu'
+                    I_norm = I_blur / max(I_blur(:));
+                    Totsu = graythresh(I_norm);
+                    BW = I_norm > Totsu;
 
-            case 'percentile'
-                I_blur = imgaussfilt(Iraw, sigmaBlur);
-                pVal = prctile(I_blur(:), percentileThreshold);
-                BW = I_blur > pVal;
+                case 'fixed'
+                    BW = I_blur > fixedThreshold;
 
-            otherwise
-                error('Unknown thresholdMode: %s', thresholdMode);
+                case 'percentile'
+                    pVal = prctile(I_blur(:), percentileThreshold);
+                    BW = I_blur > pVal;
+
+                otherwise
+                    error('Unknown thresholdMode: %s', thresholdMode);
+            end
         end
 
         % Aggressive morphological cleanup
@@ -308,7 +349,7 @@ for fr = 1:nFrames
         % Update cache
         if useMaskCaching
             cache_prevBW = BW;
-            I_norm_cache = Iraw / max(Iraw(:));
+            I_norm_cache = Iseg / max(Iseg(:));
             cache_prevMeanInt = mean(I_norm_cache(BW), 'omitnan');
         end
         cacheRecalcCount = cacheRecalcCount + 1;
