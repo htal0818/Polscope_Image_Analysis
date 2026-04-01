@@ -429,14 +429,24 @@ for fr = 1:nFrames
     polyX = xPad(smoothW+1 : smoothW+nBoundaryPts);
     polyY = yPad(smoothW+1 : smoothW+nBoundaryPts);
 
-    % Tangent vectors via central finite differences (circular)
-    dx_t = circshift(polyX, -1) - circshift(polyX, 1);
-    dy_t = circshift(polyY, -1) - circshift(polyY, 1);
-    tn = sqrt(dx_t.^2 + dy_t.^2);
-    tx = dx_t ./ tn;  ty = dy_t ./ tn;
+    % ---- Analytic normals from distance transform gradient ----
+    % The gradient of the Euclidean distance field gives the exact normal
+    % direction at each boundary point — consistent with the distance
+    % transform's definition of depth, and free of finite-difference noise.
+    per = bwperim(BW);
+    D_full = bwdist(per);  % distance from cortex in pixels
+    [Gy, Gx] = imgradientxy(D_full, 'central');
 
-    % Inward normal = rotate tangent 90 deg, flip check against center
-    nx = ty;   ny = -tx;
+    % Sub-pixel interpolation of gradient at each smooth boundary point
+    F_Gx = griddedInterpolant({1:H, 1:W}, Gx, 'linear', 'nearest');
+    F_Gy = griddedInterpolant({1:H, 1:W}, Gy, 'linear', 'nearest');
+    nx = -F_Gx(polyY, polyX);   % inward = negative gradient (gradient points outward)
+    ny = -F_Gy(polyY, polyX);
+    nmag = sqrt(nx.^2 + ny.^2) + eps;
+    nx = nx ./ nmag;
+    ny = ny ./ nmag;
+
+    % Verify inward orientation (dot with center direction)
     toCenter_x = xc - polyX;  toCenter_y = yc - polyY;
     dot_check = nx .* toCenter_x + ny .* toCenter_y;
     nx(dot_check < 0) = -nx(dot_check < 0);
@@ -462,8 +472,8 @@ for fr = 1:nFrames
     normalProfiles(fr, validN) = normal_sum(validN) ./ normal_count(validN);
 
     %% ----- Distance transform outside-in radial profiles -----
-    per = bwperim(BW);
-    D = bwdist(per) * um_per_px;  % distance from cortex in microns
+    % Reuse per and D_full from normal computation above
+    D = D_full * um_per_px;  % distance from cortex in microns
 
     % Mask interior only
     D_interior = D;
