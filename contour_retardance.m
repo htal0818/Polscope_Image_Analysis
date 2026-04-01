@@ -40,6 +40,12 @@ inputMode = 'retardance';
 base_dir = '/path/to/your/data/Pos0/';
 retardance_pattern = '*1_Retardance*';
 
+% --- Mask source: use separate images for segmentation (e.g. State1 has
+%     sharper boundary than retardance). Set to a pattern like '*State1*'.
+%     In four_state mode, State1 is used automatically.
+%     Leave empty to segment from the retardance images themselves. ---
+mask_pattern = '';  % e.g. '*State1*' — set to '' to disable
+
 % --- For 'four_state' mode: folder with State1..State4 images ---
 % (uses base_dir above)
 % state_patterns = {'*State1*', '*State2*', '*State3*', '*State4*'};
@@ -80,7 +86,6 @@ radialStep_um  = 0.5;  % radial sampling step (microns)
 nAngleSamples  = 360;  % angular resolution for radial profiles
 
 % --- Outside-in radial profile parameters ---
-nFourier       = 25;   % number of Fourier harmonics for boundary fit
 nBoundaryPts   = 500;  % number of uniformly spaced boundary points
 maxDepth_um    = 50;   % how far inward from cortex to sample (microns)
 depthStep_um   = 0.5;  % step size along inward normals (microns)
@@ -119,6 +124,7 @@ switch inputMode
         frameName = @(t) d(t).name;
 
     case 'four_state'
+        % Load 4-state images for mask/contour generation
         state_patterns = {'*State1*', '*State2*', '*State3*', '*State4*'};
         ds = cell(1,4);
         for si = 1:4
@@ -126,12 +132,27 @@ switch inputMode
             [~, idx] = sort({ds{si}.name});
             ds{si} = ds{si}(idx);
         end
-        nFrames = min(cellfun(@numel, ds));
-        readFrame = @(t) double(imread(fullfile(ds{1}(t).folder, ds{1}(t).name))) ...
-                       + double(imread(fullfile(ds{2}(t).folder, ds{2}(t).name))) ...
-                       + double(imread(fullfile(ds{3}(t).folder, ds{3}(t).name))) ...
-                       + double(imread(fullfile(ds{4}(t).folder, ds{4}(t).name)));
-        frameName = @(t) ds{1}(t).name;
+        readMask = @(t) double(imread(fullfile(ds{1}(t).folder, ds{1}(t).name))) ...
+                      + double(imread(fullfile(ds{2}(t).folder, ds{2}(t).name))) ...
+                      + double(imread(fullfile(ds{3}(t).folder, ds{3}(t).name))) ...
+                      + double(imread(fullfile(ds{4}(t).folder, ds{4}(t).name)));
+
+        % Load retardance images for measurement
+        d = dir(fullfile(base_dir, retardance_pattern));
+        if isempty(d)
+            error('No retardance images found matching "%s" in %s', ...
+                retardance_pattern, base_dir);
+        end
+        [~, sortIdx] = sort({d.name});
+        d = d(sortIdx);
+
+        nFrames = min([numel(d), cellfun(@numel, ds)]);
+        nMaskFrames = min(cellfun(@numel, ds));
+        readFrame = @(t) double(imread(fullfile(d(t).folder, d(t).name)));
+        frameName = @(t) d(t).name;
+        useMaskSource = true;
+        fprintf('  Mask source: 4-state sum (%d files)\n', nMaskFrames);
+        fprintf('  Measurement: retardance (%d files)\n', numel(d));
 
     case 'multipage'
         info = imfinfo(multipage_path);
@@ -144,6 +165,24 @@ switch inputMode
 end
 
 fprintf('Found %d frames (mode: %s)\n', nFrames, inputMode);
+
+% --- Set up mask source (if not already configured by four_state mode) ---
+if ~exist('useMaskSource', 'var')
+    useMaskSource = false;
+end
+if ~useMaskSource && ~isempty(mask_pattern)
+    ds_mask = dir(fullfile(base_dir, mask_pattern));
+    if isempty(ds_mask)
+        warning('No mask images found matching "%s" — segmenting from retardance.', mask_pattern);
+    else
+        [~, mIdx] = sort({ds_mask.name});
+        ds_mask = ds_mask(mIdx);
+        nMaskFrames = numel(ds_mask);
+        readMask = @(t) double(imread(fullfile(ds_mask(t).folder, ds_mask(t).name)));
+        useMaskSource = true;
+        fprintf('  Mask source: %s (%d files)\n', mask_pattern, nMaskFrames);
+    end
+end
 
 %% ========================== SETUP =========================================
 if ~exist(outDir, 'dir')
@@ -237,6 +276,16 @@ for fr = 1:nFrames
 
     %% ----- Boundary detection (with smart mask caching) -----
 
+    % Choose segmentation source: external mask images or retardance
+    if useMaskSource && fr <= nMaskFrames
+        Iseg = readMask(fr);
+        if doCrop; Iseg = imcrop(Iseg, cropRect); end
+        segFromMask = true;
+    else
+        Iseg = Iraw;
+        segFromMask = false;
+    end
+
     % Decide whether to recalculate or reuse previous mask
     needsRecalc = true;
 
@@ -245,7 +294,7 @@ for fr = 1:nFrames
             needsRecalc = true;   % forced drift correction
         else
             % Check intensity change inside previous mask
-            I_norm_check = Iraw / max(Iraw(:));
+            I_norm_check = Iseg / max(Iseg(:));
             meanIntCurrent = mean(I_norm_check(cache_prevBW), 'omitnan');
             intensityChange = abs(meanIntCurrent - cache_prevMeanInt) / (cache_prevMeanInt + eps);
 
@@ -257,24 +306,31 @@ for fr = 1:nFrames
 
     if needsRecalc || ~useMaskCaching
         % --- FULL MASK RECALCULATION ---
-        switch thresholdMode
-            case 'otsu'
-                I_blur = imgaussfilt(Iraw, sigmaBlur);
-                I_norm = I_blur / max(I_blur(:));
-                Totsu = graythresh(I_norm);
-                BW = I_norm > Totsu;
+        I_blur = imgaussfilt(Iseg, sigmaBlur);
 
-            case 'fixed'
-                I_blur = imgaussfilt(Iraw, sigmaBlur);
-                BW = I_blur > fixedThreshold;
+        if segFromMask
+            % Mask source (e.g. 4-state sum): oocyte is DARK on lighter background → invert
+            I_norm = I_blur / max(I_blur(:));
+            Totsu = graythresh(I_norm);
+            BW = I_norm < Totsu;   % inverted: oocyte is below threshold
+        else
+            % Retardance: oocyte cortex is BRIGHT → standard threshold
+            switch thresholdMode
+                case 'otsu'
+                    I_norm = I_blur / max(I_blur(:));
+                    Totsu = graythresh(I_norm);
+                    BW = I_norm > Totsu;
 
-            case 'percentile'
-                I_blur = imgaussfilt(Iraw, sigmaBlur);
-                pVal = prctile(I_blur(:), percentileThreshold);
-                BW = I_blur > pVal;
+                case 'fixed'
+                    BW = I_blur > fixedThreshold;
 
-            otherwise
-                error('Unknown thresholdMode: %s', thresholdMode);
+                case 'percentile'
+                    pVal = prctile(I_blur(:), percentileThreshold);
+                    BW = I_blur > pVal;
+
+                otherwise
+                    error('Unknown thresholdMode: %s', thresholdMode);
+            end
         end
 
         % Aggressive morphological cleanup
@@ -309,7 +365,7 @@ for fr = 1:nFrames
         % Update cache
         if useMaskCaching
             cache_prevBW = BW;
-            I_norm_cache = Iraw / max(Iraw(:));
+            I_norm_cache = Iseg / max(Iseg(:));
             cache_prevMeanInt = mean(I_norm_cache(BW), 'omitnan');
         end
         cacheRecalcCount = cacheRecalcCount + 1;
@@ -337,7 +393,11 @@ for fr = 1:nFrames
     centroidXY(fr,:) = [xc, yc];
     meanRadius_px(fr) = R_fit;
 
-    % Shrink boundary inward onto cortical ring center
+    % Save unshrunk boundary for outside-in profiling (starts at true cortex)
+    xb_orig = xb;
+    yb_orig = yb;
+
+    % Shrink boundary inward onto cortical ring center (for kymograph only)
     dx = xb - xc;  dy = yb - yc;
     dist = sqrt(dx.^2 + dy.^2);
     shrink = max(dist - boundaryInset_px, 1) ./ dist;
@@ -407,61 +467,44 @@ for fr = 1:nFrames
     validR = profile_count > 0;
     radialProfiles(fr, validR) = profile_sum(validR) ./ profile_count(validR);
 
-    %% ----- Fourier boundary fit (outside-in profiling) -----
-    % Fourier series is naturally periodic — no wrap-around artifacts
-    % and no Runge's phenomenon (unlike high-order polynomial fit).
-    bnd_dx = xb - xc;  bnd_dy = yb - yc;
-    bnd_r = sqrt(bnd_dx.^2 + bnd_dy.^2);
-    bnd_theta = atan2(bnd_dy, bnd_dx);  % range [-pi, pi]
+    %% ----- Smooth boundary contour (outside-in profiling) -----
+    % Use unshrunk boundary so depth=0 sits at the true cortex edge,
+    % matching the distance transform reference point.
 
-    % Sort by angle for fitting
-    [bnd_theta_sort, sIdx] = sort(bnd_theta);
-    bnd_r_sort = bnd_r(sIdx);
+    % Resample at uniform arc-length spacing
+    cumLen = [0; cumsum(sqrt(diff(xb_orig).^2 + diff(yb_orig).^2))];
+    uniformS = linspace(0, cumLen(end), nBoundaryPts+1)';
+    uniformS(end) = [];
+    polyX = interp1(cumLen, xb_orig, uniformS, 'pchip')';
+    polyY = interp1(cumLen, yb_orig, uniformS, 'pchip')';
 
-    % Build design matrix: r(theta) = a0 + sum_n [an*cos(n*theta) + bn*sin(n*theta)]
-    nPts_bnd = numel(bnd_theta_sort);
-    A_fourier = ones(nPts_bnd, 2*nFourier + 1);
-    for ni = 1:nFourier
-        A_fourier(:, 2*ni)   = cos(ni * bnd_theta_sort);
-        A_fourier(:, 2*ni+1) = sin(ni * bnd_theta_sort);
-    end
-    fourier_coeffs = A_fourier \ bnd_r_sort;
+    % Circular Gaussian smoothing (pad-smooth-trim for wrap-around)
+    smoothW = max(5, round(nBoundaryPts * 0.10));  % ~10% of perimeter
+    xPad = [polyX(end-smoothW+1:end), polyX, polyX(1:smoothW)];
+    yPad = [polyY(end-smoothW+1:end), polyY, polyY(1:smoothW)];
+    xPad = smoothdata(xPad, 'gaussian', smoothW);
+    yPad = smoothdata(yPad, 'gaussian', smoothW);
+    polyX = xPad(smoothW+1 : smoothW+nBoundaryPts);
+    polyY = yPad(smoothW+1 : smoothW+nBoundaryPts);
 
-    % Evaluate on uniform grid
-    polyTheta = linspace(-pi, pi, nBoundaryPts+1);
-    polyTheta(end) = [];
-    A_eval = ones(1, 2*nFourier + 1);
-    A_eval = repmat(A_eval, nBoundaryPts, 1);
-    A_eval(:,1) = 1;
-    for ni = 1:nFourier
-        A_eval(:, 2*ni)   = cos(ni * polyTheta(:));
-        A_eval(:, 2*ni+1) = sin(ni * polyTheta(:));
-    end
-    polyR = (A_eval * fourier_coeffs)';
+    % ---- Analytic normals from distance transform gradient ----
+    % The gradient of the Euclidean distance field gives the exact normal
+    % direction at each boundary point — consistent with the distance
+    % transform's definition of depth, and free of finite-difference noise.
+    per = bwperim(BW);
+    D_full = bwdist(per);  % distance from cortex in pixels
+    [Gy, Gx] = imgradientxy(D_full, 'central');
 
-    % Smooth boundary points in Cartesian
-    polyX = xc + polyR .* cos(polyTheta);
-    polyY = yc + polyR .* sin(polyTheta);
+    % Sub-pixel interpolation of gradient at each smooth boundary point
+    F_Gx = griddedInterpolant({1:H, 1:W}, Gx, 'linear', 'nearest');
+    F_Gy = griddedInterpolant({1:H, 1:W}, Gy, 'linear', 'nearest');
+    nx = -F_Gx(polyY, polyX);   % inward = negative gradient (gradient points outward)
+    ny = -F_Gy(polyY, polyX);
+    nmag = sqrt(nx.^2 + ny.^2) + eps;
+    nx = nx ./ nmag;
+    ny = ny ./ nmag;
 
-    % ---- Analytic derivative dr/dtheta from Fourier coefficients ----
-    drdtheta = zeros(1, nBoundaryPts);
-    for ni = 1:nFourier
-        an = fourier_coeffs(2*ni);
-        bn = fourier_coeffs(2*ni+1);
-        drdtheta = drdtheta - ni * an * sin(ni * polyTheta) ...
-                             + ni * bn * cos(ni * polyTheta);
-    end
-
-    % Tangent vector in Cartesian: d/dtheta [r*cos(theta), r*sin(theta)]
-    tx = drdtheta .* cos(polyTheta) - polyR .* sin(polyTheta);
-    ty = drdtheta .* sin(polyTheta) + polyR .* cos(polyTheta);
-    tn = sqrt(tx.^2 + ty.^2);
-    tx = tx ./ tn;  ty = ty ./ tn;
-
-    % Inward normal = rotate tangent 90 deg clockwise (points toward center)
-    % Check: normal should point roughly toward center
-    nx = ty;   ny = -tx;
-    % Flip normals that point outward (dot with center direction)
+    % Verify inward orientation (dot with center direction)
     toCenter_x = xc - polyX;  toCenter_y = yc - polyY;
     dot_check = nx .* toCenter_x + ny .* toCenter_y;
     nx(dot_check < 0) = -nx(dot_check < 0);
@@ -487,8 +530,8 @@ for fr = 1:nFrames
     normalProfiles(fr, validN) = normal_sum(validN) ./ normal_count(validN);
 
     %% ----- Distance transform outside-in radial profiles -----
-    per = bwperim(BW);
-    D = bwdist(per) * um_per_px;  % distance from cortex in microns
+    % Reuse per and D_full from normal computation above
+    D = D_full * um_per_px;  % distance from cortex in microns
 
     % Mask interior only
     D_interior = D;
@@ -754,7 +797,7 @@ results.nThetaBins            = nThetaBins;
 results.nAngleSamples         = nAngleSamples;
 results.inputMode             = inputMode;
 results.thresholdMode         = thresholdMode;
-results.nFourier              = nFourier;
+results.smoothWindow          = smoothW;
 results.nBoundaryPts          = nBoundaryPts;
 results.maxDepth_um           = maxDepth_um;
 results.depthStep_um          = depthStep_um;
