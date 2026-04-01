@@ -40,10 +40,11 @@ inputMode = 'retardance';
 base_dir = '/path/to/your/data/Pos0/';
 retardance_pattern = '*1_Retardance*';
 
-% --- Mask source: use State1 images for segmentation (sharper boundary,
-%     more stable intensity than retardance). Leave empty to segment from
-%     the retardance images themselves. ---
-state1_pattern = '';  % e.g. '*State1*' — set to '' to disable
+% --- Mask source: use separate images for segmentation (e.g. State1 has
+%     sharper boundary than retardance). Set to a pattern like '*State1*'.
+%     In four_state mode, State1 is used automatically.
+%     Leave empty to segment from the retardance images themselves. ---
+mask_pattern = '';  % e.g. '*State1*' — set to '' to disable
 
 % --- For 'four_state' mode: folder with State1..State4 images ---
 % (uses base_dir above)
@@ -123,6 +124,7 @@ switch inputMode
         frameName = @(t) d(t).name;
 
     case 'four_state'
+        % Load 4-state images for mask/contour generation
         state_patterns = {'*State1*', '*State2*', '*State3*', '*State4*'};
         ds = cell(1,4);
         for si = 1:4
@@ -130,12 +132,27 @@ switch inputMode
             [~, idx] = sort({ds{si}.name});
             ds{si} = ds{si}(idx);
         end
-        nFrames = min(cellfun(@numel, ds));
-        readFrame = @(t) double(imread(fullfile(ds{1}(t).folder, ds{1}(t).name))) ...
-                       + double(imread(fullfile(ds{2}(t).folder, ds{2}(t).name))) ...
-                       + double(imread(fullfile(ds{3}(t).folder, ds{3}(t).name))) ...
-                       + double(imread(fullfile(ds{4}(t).folder, ds{4}(t).name)));
-        frameName = @(t) ds{1}(t).name;
+        readMask = @(t) double(imread(fullfile(ds{1}(t).folder, ds{1}(t).name))) ...
+                      + double(imread(fullfile(ds{2}(t).folder, ds{2}(t).name))) ...
+                      + double(imread(fullfile(ds{3}(t).folder, ds{3}(t).name))) ...
+                      + double(imread(fullfile(ds{4}(t).folder, ds{4}(t).name)));
+
+        % Load retardance images for measurement
+        d = dir(fullfile(base_dir, retardance_pattern));
+        if isempty(d)
+            error('No retardance images found matching "%s" in %s', ...
+                retardance_pattern, base_dir);
+        end
+        [~, sortIdx] = sort({d.name});
+        d = d(sortIdx);
+
+        nFrames = min([numel(d), cellfun(@numel, ds)]);
+        nMaskFrames = min(cellfun(@numel, ds));
+        readFrame = @(t) double(imread(fullfile(d(t).folder, d(t).name)));
+        frameName = @(t) d(t).name;
+        useMaskSource = true;
+        fprintf('  Mask source: 4-state sum (%d files)\n', nMaskFrames);
+        fprintf('  Measurement: retardance (%d files)\n', numel(d));
 
     case 'multipage'
         info = imfinfo(multipage_path);
@@ -149,33 +166,22 @@ end
 
 fprintf('Found %d frames (mode: %s)\n', nFrames, inputMode);
 
-% --- Load State1 images for mask generation (if specified) ---
-% In four_state mode, State1 is automatically used for segmentation.
-if strcmp(inputMode, 'four_state')
-    % State1 already loaded as ds{1} — use it directly
-    useState1Mask = true;
-    nState1 = numel(ds{1});
-    readState1 = @(t) double(imread(fullfile(ds{1}(t).folder, ds{1}(t).name)));
-    fprintf('Using State1 images for segmentation (four_state mode, %d files)\n', nState1);
-elseif ~isempty(state1_pattern)
-    % Retardance mode with explicit State1 pattern
-    useState1Mask = true;
-    ds1 = dir(fullfile(base_dir, state1_pattern));
-    if isempty(ds1)
-        warning('No State1 images found matching "%s" — falling back to retardance for segmentation.', state1_pattern);
-        useState1Mask = false;
+% --- Set up mask source (if not already configured by four_state mode) ---
+if ~exist('useMaskSource', 'var')
+    useMaskSource = false;
+end
+if ~useMaskSource && ~isempty(mask_pattern)
+    ds_mask = dir(fullfile(base_dir, mask_pattern));
+    if isempty(ds_mask)
+        warning('No mask images found matching "%s" — segmenting from retardance.', mask_pattern);
     else
-        [~, s1Idx] = sort({ds1.name});
-        ds1 = ds1(s1Idx);
-        nState1 = numel(ds1);
-        if nState1 < nFrames
-            warning('Only %d State1 images for %d frames — extra frames will use retardance segmentation.', nState1, nFrames);
-        end
-        readState1 = @(t) double(imread(fullfile(ds1(t).folder, ds1(t).name)));
-        fprintf('Using State1 images for segmentation (%d files)\n', nState1);
+        [~, mIdx] = sort({ds_mask.name});
+        ds_mask = ds_mask(mIdx);
+        nMaskFrames = numel(ds_mask);
+        readMask = @(t) double(imread(fullfile(ds_mask(t).folder, ds_mask(t).name)));
+        useMaskSource = true;
+        fprintf('  Mask source: %s (%d files)\n', mask_pattern, nMaskFrames);
     end
-else
-    useState1Mask = false;
 end
 
 %% ========================== SETUP =========================================
@@ -270,14 +276,14 @@ for fr = 1:nFrames
 
     %% ----- Boundary detection (with smart mask caching) -----
 
-    % Choose segmentation source: State1 (if available) or retardance
-    if useState1Mask && fr <= nState1
-        Iseg = readState1(fr);
+    % Choose segmentation source: external mask images or retardance
+    if useMaskSource && fr <= nMaskFrames
+        Iseg = readMask(fr);
         if doCrop; Iseg = imcrop(Iseg, cropRect); end
-        segFromState1 = true;
+        segFromMask = true;
     else
         Iseg = Iraw;
-        segFromState1 = false;
+        segFromMask = false;
     end
 
     % Decide whether to recalculate or reuse previous mask
@@ -302,8 +308,8 @@ for fr = 1:nFrames
         % --- FULL MASK RECALCULATION ---
         I_blur = imgaussfilt(Iseg, sigmaBlur);
 
-        if segFromState1
-            % State1: oocyte is DARK on lighter background → invert threshold
+        if segFromMask
+            % Mask source (e.g. 4-state sum): oocyte is DARK on lighter background → invert
             I_norm = I_blur / max(I_blur(:));
             Totsu = graythresh(I_norm);
             BW = I_norm < Totsu;   % inverted: oocyte is below threshold
