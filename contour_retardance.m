@@ -80,7 +80,6 @@ radialStep_um  = 0.5;  % radial sampling step (microns)
 nAngleSamples  = 360;  % angular resolution for radial profiles
 
 % --- Outside-in radial profile parameters ---
-nFourier       = 25;   % number of Fourier harmonics for boundary fit
 nBoundaryPts   = 500;  % number of uniformly spaced boundary points
 maxDepth_um    = 50;   % how far inward from cortex to sample (microns)
 depthStep_um   = 0.5;  % step size along inward normals (microns)
@@ -181,10 +180,8 @@ radialAxis_um = 0 : radialStep_um : maxRadius_um;
 nRadial = numel(radialAxis_um);
 radialAxis_px = radialAxis_um / um_per_px;
 
-% Depth axis (outside-in: negative = outward toward cortex, positive = deeper)
-% Extend outward by the boundary inset so normals capture the cortical peak
-outward_um = boundaryInset_px / px_per_um + 2;  % extra 2 um beyond inset
-depthAxis_um = -outward_um : depthStep_um : maxDepth_um;
+% Depth axis (outside-in: 0 = cortex, increasing = deeper into oocyte)
+depthAxis_um = 0 : depthStep_um : maxDepth_um;
 nDepth = numel(depthAxis_um);
 depthAxis_px = depthAxis_um / um_per_px;
 
@@ -338,7 +335,11 @@ for fr = 1:nFrames
     centroidXY(fr,:) = [xc, yc];
     meanRadius_px(fr) = R_fit;
 
-    % Shrink boundary inward onto cortical ring center
+    % Save unshrunk boundary for outside-in profiling (starts at true cortex)
+    xb_orig = xb;
+    yb_orig = yb;
+
+    % Shrink boundary inward onto cortical ring center (for kymograph only)
     dx = xb - xc;  dy = yb - yc;
     dist = sqrt(dx.^2 + dy.^2);
     shrink = max(dist - boundaryInset_px, 1) ./ dist;
@@ -408,61 +409,34 @@ for fr = 1:nFrames
     validR = profile_count > 0;
     radialProfiles(fr, validR) = profile_sum(validR) ./ profile_count(validR);
 
-    %% ----- Fourier boundary fit (outside-in profiling) -----
-    % Fourier series is naturally periodic — no wrap-around artifacts
-    % and no Runge's phenomenon (unlike high-order polynomial fit).
-    bnd_dx = xb - xc;  bnd_dy = yb - yc;
-    bnd_r = sqrt(bnd_dx.^2 + bnd_dy.^2);
-    bnd_theta = atan2(bnd_dy, bnd_dx);  % range [-pi, pi]
+    %% ----- Smooth boundary contour (outside-in profiling) -----
+    % Use unshrunk boundary so depth=0 sits at the true cortex edge,
+    % matching the distance transform reference point.
 
-    % Sort by angle for fitting
-    [bnd_theta_sort, sIdx] = sort(bnd_theta);
-    bnd_r_sort = bnd_r(sIdx);
+    % Resample at uniform arc-length spacing
+    cumLen = [0; cumsum(sqrt(diff(xb_orig).^2 + diff(yb_orig).^2))];
+    uniformS = linspace(0, cumLen(end), nBoundaryPts+1)';
+    uniformS(end) = [];
+    polyX = interp1(cumLen, xb_orig, uniformS, 'pchip')';
+    polyY = interp1(cumLen, yb_orig, uniformS, 'pchip')';
 
-    % Build design matrix: r(theta) = a0 + sum_n [an*cos(n*theta) + bn*sin(n*theta)]
-    nPts_bnd = numel(bnd_theta_sort);
-    A_fourier = ones(nPts_bnd, 2*nFourier + 1);
-    for ni = 1:nFourier
-        A_fourier(:, 2*ni)   = cos(ni * bnd_theta_sort);
-        A_fourier(:, 2*ni+1) = sin(ni * bnd_theta_sort);
-    end
-    fourier_coeffs = A_fourier \ bnd_r_sort;
+    % Circular Gaussian smoothing (pad-smooth-trim for wrap-around)
+    smoothW = max(5, round(nBoundaryPts * 0.10));  % ~10% of perimeter
+    xPad = [polyX(end-smoothW+1:end), polyX, polyX(1:smoothW)];
+    yPad = [polyY(end-smoothW+1:end), polyY, polyY(1:smoothW)];
+    xPad = smoothdata(xPad, 'gaussian', smoothW);
+    yPad = smoothdata(yPad, 'gaussian', smoothW);
+    polyX = xPad(smoothW+1 : smoothW+nBoundaryPts);
+    polyY = yPad(smoothW+1 : smoothW+nBoundaryPts);
 
-    % Evaluate on uniform grid
-    polyTheta = linspace(-pi, pi, nBoundaryPts+1);
-    polyTheta(end) = [];
-    A_eval = ones(1, 2*nFourier + 1);
-    A_eval = repmat(A_eval, nBoundaryPts, 1);
-    A_eval(:,1) = 1;
-    for ni = 1:nFourier
-        A_eval(:, 2*ni)   = cos(ni * polyTheta(:));
-        A_eval(:, 2*ni+1) = sin(ni * polyTheta(:));
-    end
-    polyR = (A_eval * fourier_coeffs)';
+    % Tangent vectors via central finite differences (circular)
+    dx_t = circshift(polyX, -1) - circshift(polyX, 1);
+    dy_t = circshift(polyY, -1) - circshift(polyY, 1);
+    tn = sqrt(dx_t.^2 + dy_t.^2);
+    tx = dx_t ./ tn;  ty = dy_t ./ tn;
 
-    % Smooth boundary points in Cartesian
-    polyX = xc + polyR .* cos(polyTheta);
-    polyY = yc + polyR .* sin(polyTheta);
-
-    % ---- Analytic derivative dr/dtheta from Fourier coefficients ----
-    drdtheta = zeros(1, nBoundaryPts);
-    for ni = 1:nFourier
-        an = fourier_coeffs(2*ni);
-        bn = fourier_coeffs(2*ni+1);
-        drdtheta = drdtheta - ni * an * sin(ni * polyTheta) ...
-                             + ni * bn * cos(ni * polyTheta);
-    end
-
-    % Tangent vector in Cartesian: d/dtheta [r*cos(theta), r*sin(theta)]
-    tx = drdtheta .* cos(polyTheta) - polyR .* sin(polyTheta);
-    ty = drdtheta .* sin(polyTheta) + polyR .* cos(polyTheta);
-    tn = sqrt(tx.^2 + ty.^2);
-    tx = tx ./ tn;  ty = ty ./ tn;
-
-    % Inward normal = rotate tangent 90 deg clockwise (points toward center)
-    % Check: normal should point roughly toward center
+    % Inward normal = rotate tangent 90 deg, flip check against center
     nx = ty;   ny = -tx;
-    % Flip normals that point outward (dot with center direction)
     toCenter_x = xc - polyX;  toCenter_y = yc - polyY;
     dot_check = nx .* toCenter_x + ny .* toCenter_y;
     nx(dot_check < 0) = -nx(dot_check < 0);
@@ -755,7 +729,7 @@ results.nThetaBins            = nThetaBins;
 results.nAngleSamples         = nAngleSamples;
 results.inputMode             = inputMode;
 results.thresholdMode         = thresholdMode;
-results.nFourier              = nFourier;
+results.smoothWindow          = smoothW;
 results.nBoundaryPts          = nBoundaryPts;
 results.maxDepth_um           = maxDepth_um;
 results.depthStep_um          = depthStep_um;
