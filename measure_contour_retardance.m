@@ -8,6 +8,7 @@ function result = measure_contour_retardance(Iraw, opts)
 %
 %   INPUTS
 %     Iraw  — [H x W] double, raw pixel values (e.g. 0..65535 for 16-bit)
+%             Used for retardance conversion and measurement.
 %     opts  — struct with fields (all optional, defaults shown):
 %               retardance_ceiling_nm  (50)     Polscope ceiling in nm
 %               bit_depth              (16)     image bit depth
@@ -19,6 +20,9 @@ function result = measure_contour_retardance(Iraw, opts)
 %               fixedThreshold         (500)    for 'fixed' mode
 %               percentileThreshold    (30)     for 'percentile' mode
 %               prevBW                 ([])     previous frame mask for fallback
+%               Iseg                   ([])     separate image for segmentation
+%                                               (e.g. sum of State1-4). If empty,
+%                                               Iraw is used for segmentation.
 %
 %   OUTPUT
 %     result — struct with fields:
@@ -48,7 +52,8 @@ function result = measure_contour_retardance(Iraw, opts)
         'thresholdMode',         'otsu', ...
         'fixedThreshold',        500, ...
         'percentileThreshold',   30, ...
-        'prevBW',                []);
+        'prevBW',                [], ...
+        'Iseg',                  []);
     flds = fieldnames(def);
     for k = 1:numel(flds)
         if ~isfield(opts, flds{k})
@@ -62,16 +67,24 @@ function result = measure_contour_retardance(Iraw, opts)
     [H, W] = size(Iraw);
 
     %% Boundary detection
+    % Use separate segmentation image if provided (e.g. sum of State1-4),
+    % otherwise fall back to Iraw.
+    if ~isempty(opts.Iseg)
+        Iseg = opts.Iseg;
+    else
+        Iseg = Iraw;
+    end
+
     switch opts.thresholdMode
         case 'otsu'
-            I_blur = imgaussfilt(Iraw, opts.sigmaBlur);
+            I_blur = imgaussfilt(Iseg, opts.sigmaBlur);
             I_norm = I_blur / max(I_blur(:));
             BW = I_norm > graythresh(I_norm);
         case 'fixed'
-            I_blur = imgaussfilt(Iraw, opts.sigmaBlur);
+            I_blur = imgaussfilt(Iseg, opts.sigmaBlur);
             BW = I_blur > opts.fixedThreshold;
         case 'percentile'
-            I_blur = imgaussfilt(Iraw, opts.sigmaBlur);
+            I_blur = imgaussfilt(Iseg, opts.sigmaBlur);
             pVal = prctile(I_blur(:), opts.percentileThreshold);
             BW = I_blur > pVal;
         otherwise
