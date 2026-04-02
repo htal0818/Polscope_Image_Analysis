@@ -132,6 +132,7 @@ for si = 1:numel(smDirs)
         case 'retardance'
             % Find retardance image(s) in Pos0
             d = dir(fullfile(pos0Dir, retardance_pattern));
+            d = d(~[d.isdir]);  % exclude directories
             if isempty(d)
                 fprintf('  [SKIP] %s/Pos0 — no retardance images matching "%s"\n', ...
                     smName, retardance_pattern);
@@ -150,6 +151,7 @@ for si = 1:numel(smDirs)
             stateMissing = false;
             for qi = 1:4
                 ds = dir(fullfile(pos0Dir, state_patterns{qi}));
+                ds = ds(~[ds.isdir]);  % exclude directories
                 if isempty(ds)
                     fprintf('  [SKIP] %s/Pos0 — no images matching "%s"\n', ...
                         smName, state_patterns{qi});
@@ -173,6 +175,7 @@ for si = 1:numel(smDirs)
 
             % Also load the retardance image for measurement
             d = dir(fullfile(pos0Dir, retardance_pattern));
+            d = d(~[d.isdir]);  % exclude directories
             if isempty(d)
                 fprintf('  [SKIP] %s/Pos0 — no retardance images matching "%s"\n', ...
                     smName, retardance_pattern);
