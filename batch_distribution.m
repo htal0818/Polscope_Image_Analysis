@@ -4,7 +4,11 @@
 % This script:
 %   1. Scans a parent directory for all subfolders containing 'SM' in the name
 %   2. Inside each SM folder, looks for a 'Pos0' subfolder
-%   3. Loads the first retardance image from Pos0
+%   3. Loads image(s) from Pos0 based on inputMode:
+%        'retardance'  — loads a single pre-computed retardance image
+%        'four_state'  — loads State1..State4 images, averages them for
+%                        segmentation, and loads a separate retardance image
+%                        for measurement
 %   4. Calls measure_contour_retardance() to detect the oocyte boundary
 %      and sample retardance (nm) along the cortical contour
 %   5. Pools contour retardance values across all oocytes and produces
@@ -31,8 +35,17 @@ clear all; close all; clc
 % --- Parent directory containing all SM subfolders ---
 parent_dir = '/path/to/your/data/';
 
+% --- Input mode ---
+% 'retardance'  : pre-computed retardance images (default, current behavior)
+% 'four_state'  : raw 4-state Polscope data — State1..State4 summed/averaged
+%                 for segmentation, separate retardance image for measurement
+inputMode = 'retardance';
+
 % --- File pattern for retardance images inside Pos0 ---
 retardance_pattern = '*Retardance*';
+
+% --- File patterns for four_state mode ---
+state_patterns = {'*State1*', '*State2*', '*State3*', '*State4*'};
 
 % --- Options passed to measure_contour_retardance() ---
 % (see measure_contour_retardance.m for full list and defaults)
@@ -46,6 +59,7 @@ opts.boundaryInset_px      = 10;    % shift boundary inward onto cortex
 opts.thresholdMode         = 'otsu';
 opts.fixedThreshold        = 500;
 opts.percentileThreshold   = 30;
+opts.adaptiveSensitivity   = 0.5;  % for 'adaptive' mode (0-1, higher = more foreground)
 
 % --- Spatial calibration ---
 px_per_um = 6.25;             % pixels per micron (adjust for your objective)
@@ -112,22 +126,67 @@ for si = 1:numel(smDirs)
         continue;
     end
 
-    % Find retardance image(s) in Pos0
-    d = dir(fullfile(pos0Dir, retardance_pattern));
-    if isempty(d)
-        fprintf('  [SKIP] %s/Pos0 — no retardance images matching "%s"\n', ...
-            smName, retardance_pattern);
-        nSkipped = nSkipped + 1;
-        continue;
+    % Load image(s) based on input mode
+    imgLabel = '';
+    switch inputMode
+        case 'retardance'
+            % Find retardance image(s) in Pos0
+            d = dir(fullfile(pos0Dir, retardance_pattern));
+            if isempty(d)
+                fprintf('  [SKIP] %s/Pos0 — no retardance images matching "%s"\n', ...
+                    smName, retardance_pattern);
+                nSkipped = nSkipped + 1;
+                continue;
+            end
+            [~, sortIdx] = sort({d.name});
+            d = d(sortIdx);
+            imgPath = fullfile(d(1).folder, d(1).name);
+            Iraw = double(imread(imgPath));
+            imgLabel = d(1).name;
+
+        case 'four_state'
+            % Find State1..State4 images, sum and average for segmentation
+            stateFiles = cell(1, 4);
+            stateMissing = false;
+            for qi = 1:4
+                ds = dir(fullfile(pos0Dir, state_patterns{qi}));
+                if isempty(ds)
+                    fprintf('  [SKIP] %s/Pos0 — no images matching "%s"\n', ...
+                        smName, state_patterns{qi});
+                    stateMissing = true;
+                    break;
+                end
+                [~, idx] = sort({ds.name});
+                ds = ds(idx);
+                stateFiles{qi} = fullfile(ds(1).folder, ds(1).name);
+            end
+            if stateMissing
+                nSkipped = nSkipped + 1;
+                continue;
+            end
+            Isum = (double(imread(stateFiles{1})) ...
+                  + double(imread(stateFiles{2})) ...
+                  + double(imread(stateFiles{3})) ...
+                  + double(imread(stateFiles{4}))) / 4;
+            opts.Iseg = Isum;
+            opts.thresholdMode = 'adaptive';
+
+            % Also load the retardance image for measurement
+            d = dir(fullfile(pos0Dir, retardance_pattern));
+            if isempty(d)
+                fprintf('  [SKIP] %s/Pos0 — no retardance images matching "%s"\n', ...
+                    smName, retardance_pattern);
+                nSkipped = nSkipped + 1;
+                continue;
+            end
+            [~, sortIdx] = sort({d.name});
+            d = d(sortIdx);
+            Iraw = double(imread(fullfile(d(1).folder, d(1).name)));
+            imgLabel = sprintf('%s (four_state seg)', d(1).name);
+
+        otherwise
+            error('Unknown inputMode: %s. Use ''retardance'' or ''four_state''.', inputMode);
     end
-
-    % Sort and take the first retardance image (static snapshot)
-    [~, sortIdx] = sort({d.name});
-    d = d(sortIdx);
-    imgPath = fullfile(d(1).folder, d(1).name);
-
-    % Load image
-    Iraw = double(imread(imgPath));
 
     % Call the shared contour measurement function
     res = measure_contour_retardance(Iraw, opts);
@@ -154,7 +213,7 @@ for si = 1:numel(smDirs)
     perOocyteContour{nProcessed}  = cv;
 
     fprintf('  [OK]   %s — %s — contour mean=%.2f nm, R=%.0f um, %d pts\n', ...
-        smName, d(1).name, res.contourMean, oocyteR_um(nProcessed), numel(cv));
+        smName, imgLabel, res.contourMean, oocyteR_um(nProcessed), numel(cv));
 end
 
 elapsed = toc;
