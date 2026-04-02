@@ -59,6 +59,7 @@ opts.boundaryInset_px      = 10;    % shift boundary inward onto cortex
 opts.thresholdMode         = 'otsu';
 opts.fixedThreshold        = 500;
 opts.percentileThreshold   = 30;
+opts.adaptiveSensitivity   = 0.5;  % for 'adaptive' mode (0-1, higher = more foreground)
 
 % --- Spatial calibration ---
 px_per_um = 6.25;             % pixels per micron (adjust for your objective)
@@ -168,6 +169,7 @@ for si = 1:numel(smDirs)
                   + double(imread(stateFiles{3})) ...
                   + double(imread(stateFiles{4}))) / 4;
             opts.Iseg = Isum;
+            opts.thresholdMode = 'adaptive';
 
             % Also load the retardance image for measurement
             d = dir(fullfile(pos0Dir, retardance_pattern));

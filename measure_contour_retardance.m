@@ -16,12 +16,15 @@ function result = measure_contour_retardance(Iraw, opts)
 %               closeRadius            (25)     morphological close disk radius
 %               minArea                (5000)   minimum object area in px^2
 %               boundaryInset_px       (10)     shift boundary inward onto cortex
-%               thresholdMode          ('otsu') 'otsu', 'fixed', or 'percentile'
+%               thresholdMode          ('otsu') 'otsu', 'fixed', 'percentile',
+%                                               or 'adaptive'
 %               fixedThreshold         (500)    for 'fixed' mode
 %               percentileThreshold    (30)     for 'percentile' mode
+%               adaptiveSensitivity    (0.5)    for 'adaptive' mode (0-1,
+%                                               higher = more foreground)
 %               prevBW                 ([])     previous frame mask for fallback
 %               Iseg                   ([])     separate image for segmentation
-%                                               (e.g. sum of State1-4). If empty,
+%                                               (e.g. avg of State1-4). If empty,
 %                                               Iraw is used for segmentation.
 %
 %   OUTPUT
@@ -53,7 +56,8 @@ function result = measure_contour_retardance(Iraw, opts)
         'fixedThreshold',        500, ...
         'percentileThreshold',   30, ...
         'prevBW',                [], ...
-        'Iseg',                  []);
+        'Iseg',                  [], ...
+        'adaptiveSensitivity',   0.5);
     flds = fieldnames(def);
     for k = 1:numel(flds)
         if ~isfield(opts, flds{k})
@@ -87,6 +91,11 @@ function result = measure_contour_retardance(Iraw, opts)
             I_blur = imgaussfilt(Iseg, opts.sigmaBlur);
             pVal = prctile(I_blur(:), opts.percentileThreshold);
             BW = I_blur > pVal;
+        case 'adaptive'
+            I_blur = imgaussfilt(Iseg, opts.sigmaBlur);
+            I_norm = I_blur / max(I_blur(:));
+            T = adaptthresh(I_norm, opts.adaptiveSensitivity);
+            BW = imbinarize(I_norm, T);
         otherwise
             error('Unknown thresholdMode: %s', opts.thresholdMode);
     end
