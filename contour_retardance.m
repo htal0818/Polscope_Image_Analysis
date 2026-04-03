@@ -375,11 +375,26 @@ for fr = 1:nFrames
                 error('Unknown thresholdMode: %s', thresholdMode);
         end
 
+        % --- Debug: save intermediate masks for frame 1 ---
+        if fr == 1
+            if ~exist(outDir, 'dir'); mkdir(outDir); end
+            imwrite(uint8(I_norm*255), fullfile(outDir, 'debug_frame1_Inorm.png'));
+            imwrite(uint8(BW*255),     fullfile(outDir, 'debug_frame1_BW_raw.png'));
+            fprintf('  DEBUG: BW_raw has %d nonzero pixels (%.1f%% of image)\n', ...
+                sum(BW(:)), 100*sum(BW(:))/numel(BW));
+        end
+
         % Aggressive morphological cleanup
         se = strel('disk', closeRadius);
         BW = imclose(BW, se);
         BW = imfill(BW, 'holes');
         BW = bwareaopen(BW, minArea);
+
+        if fr == 1
+            imwrite(uint8(BW*255), fullfile(outDir, 'debug_frame1_BW_clean.png'));
+            fprintf('  DEBUG: BW_clean has %d nonzero pixels (minArea=%d)\n', ...
+                sum(BW(:)), minArea);
+        end
 
         % Fallback: gradient-based if threshold fails
         if ~any(BW(:))
