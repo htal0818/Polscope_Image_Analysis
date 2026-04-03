@@ -77,9 +77,17 @@ boundaryInset_px = 10; % shift boundary inward (px) onto cortical ring center
 % 'otsu'       : automatic Otsu threshold on blurred image (default)
 % 'fixed'      : fixed intensity threshold on raw image
 % 'percentile' : threshold at a percentile of raw image intensity
+% 'adaptive'   : locally adaptive threshold (handles uneven illumination)
+% 'edge'       : edge detection (Canny/Sobel) + morphological fill
+% 'gradient'   : gradient magnitude threshold + morphological fill
 thresholdMode       = 'otsu';
 fixedThreshold      = 500;     % raw pixel value for 'fixed' mode
 percentileThreshold = 30;      % percentile for 'percentile' mode (pixels ABOVE this)
+adaptSensitivity    = 0.5;     % adaptthresh sensitivity [0..1]; higher = more foreground
+adaptNeighborhood   = 201;     % adaptthresh neighborhood size (odd integer, px)
+edgeMethod          = 'Canny'; % edge() method: 'Canny', 'Sobel', 'Prewitt', 'log'
+edgeDilateRadius    = 3;       % dilation radius (px) to close edge gaps before fill
+gradientPercentile  = 80;      % gradient magnitude percentile for 'gradient' mode
 
 % --- Radial profile parameters ---
 radialStep_um  = 0.5;  % radial sampling step (microns)
@@ -308,29 +316,63 @@ for fr = 1:nFrames
         % --- FULL MASK RECALCULATION ---
         I_blur = imgaussfilt(Iseg, sigmaBlur);
 
-        if segFromMask
-            % Mask source (e.g. 4-state sum): oocyte is DARK on lighter background → invert
-            I_norm = I_blur / max(I_blur(:));
-            Totsu = graythresh(I_norm);
-            BW = I_norm < Totsu;   % inverted: oocyte is below threshold
-        else
-            % Retardance: oocyte cortex is BRIGHT → standard threshold
-            switch thresholdMode
-                case 'otsu'
-                    I_norm = I_blur / max(I_blur(:));
-                    Totsu = graythresh(I_norm);
+        I_norm = I_blur / max(I_blur(:));
+
+        switch thresholdMode
+            case 'otsu'
+                Totsu = graythresh(I_norm);
+                if segFromMask
+                    BW = I_norm < Totsu;
+                else
                     BW = I_norm > Totsu;
+                end
 
-                case 'fixed'
+            case 'fixed'
+                if segFromMask
+                    BW = I_blur < fixedThreshold;
+                else
                     BW = I_blur > fixedThreshold;
+                end
 
-                case 'percentile'
-                    pVal = prctile(I_blur(:), percentileThreshold);
+            case 'percentile'
+                pVal = prctile(I_blur(:), percentileThreshold);
+                if segFromMask
+                    BW = I_blur < pVal;
+                else
                     BW = I_blur > pVal;
+                end
 
-                otherwise
-                    error('Unknown thresholdMode: %s', thresholdMode);
-            end
+            case 'adaptive'
+                nhd = min(adaptNeighborhood, 2*floor(min(size(I_norm))/4)+1);
+                T = adaptthresh(I_norm, adaptSensitivity, ...
+                        'NeighborhoodSize', nhd);
+                BW = imbinarize(I_norm, T);
+                if segFromMask
+                    BW = ~BW;
+                end
+
+            case 'edge'
+                edges = edge(I_norm, edgeMethod);
+                se_edge = strel('disk', edgeDilateRadius);
+                edges = imdilate(edges, se_edge);
+                BW = imfill(edges, 'holes');
+                if segFromMask && sum(BW(:)) > 0.5 * numel(BW)
+                    BW = ~BW;
+                end
+
+            case 'gradient'
+                [Gmag, ~] = imgradient(I_blur);
+                thrG = prctile(Gmag(:), gradientPercentile);
+                BW_edges = Gmag >= thrG;
+                se_edge = strel('disk', edgeDilateRadius);
+                BW_edges = imdilate(BW_edges, se_edge);
+                BW = imfill(BW_edges, 'holes');
+                if segFromMask && sum(BW(:)) > 0.5 * numel(BW)
+                    BW = ~BW;
+                end
+
+            otherwise
+                error('Unknown thresholdMode: %s', thresholdMode);
         end
 
         % Aggressive morphological cleanup
@@ -796,6 +838,11 @@ results.nThetaBins            = nThetaBins;
 results.nAngleSamples         = nAngleSamples;
 results.inputMode             = inputMode;
 results.thresholdMode         = thresholdMode;
+results.adaptSensitivity      = adaptSensitivity;
+results.adaptNeighborhood     = adaptNeighborhood;
+results.edgeMethod            = edgeMethod;
+results.edgeDilateRadius      = edgeDilateRadius;
+results.gradientPercentile    = gradientPercentile;
 results.smoothWindow          = smoothW;
 results.nBoundaryPts          = nBoundaryPts;
 results.maxDepth_um           = maxDepth_um;
