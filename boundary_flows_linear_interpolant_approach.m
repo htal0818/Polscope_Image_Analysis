@@ -698,15 +698,16 @@ fprintf('  - normalOffsetPx: %d pixels inward from boundary\n', normalOffsetPx);
 function [BW, stats, poly, RADIUS, xc, yc, tx, ty, theta_boundary] = ...
     make_oocyte_mask_with_tangents(I, sigmaBlur, threshFrac, se, polyOrder, ...
     nBoundary, theta, minAreaFrac, maxEccentric, minSolidity, centerHint)
-% Curvature-based boundary reconstruction WITH ANALYTICAL TANGENTS
+% Oocyte boundary segmentation using contour_retardance pipeline + curvature
+% + analytical tangent computation.
 %
-% This function extends make_oocyte_mask_curvature to also output:
+% Uses segment_oocyte.m for mask detection, compute_curvature_from_boundary.m
+% for polar polynomial curvature, then computes analytical tangent vectors
+% from the polynomial derivatives.
+%
+% Outputs:
 %   tx, ty - unit tangent vectors at each boundary point (analytical)
 %   theta_boundary - theta values at each boundary point
-%
-% Tangents are computed analytically from the polar curve formula:
-%   dx/dtheta = r'*cos(theta) - r*sin(theta)
-%   dy/dtheta = r'*sin(theta) + r*cos(theta)
 
 [H, W] = size(I);
 
@@ -722,150 +723,43 @@ RADIUS = nan(1, numel(theta)-1);
 xc = centerHint(1); yc = centerHint(2);
 tx = []; ty = []; theta_boundary = [];
 
-% 1) Coarse threshold mask
-Iblur = imgaussfilt(I, sigmaBlur);
-BW0 = Iblur < (threshFrac * mean2(Iblur));
-BW0 = imdilate(BW0, se);
-BW0 = imfill(BW0, 'holes');
-BW0 = imerode(BW0, se);
+% --- Segmentation via contour_retardance pipeline ---
+segParams.sigmaBlur            = sigmaBlur;
+segParams.closeRadius          = 1;
+segParams.minArea              = 5000;
+segParams.thresholdMode        = 'adaptive';
+segParams.segFromMask          = true;
+segParams.adaptSensitivity     = 0.7;
+segParams.adaptNeighborhood    = 201;
+segParams.edgeMethod           = 'Sobel';
+segParams.edgeDilateRadius     = 2;
+segParams.gradientPercentile   = 70;
+segParams.useCaching           = false;  % caching handled by caller
 
-% Keep largest connected component
-labels = bwlabel(BW0);
-if max(labels(:)) == 0
-    return;
-end
-Area = zeros(1, max(labels(:)));
-for i = 1:max(labels(:))
-    temp = regionprops(labels == i, 'Area');
-    Area(i) = temp.Area;
-end
-mask = labels == find(Area == max(Area), 1);
-BW0 = mask;
-
-% 2) Edge pixels
-edges = imgradient(BW0);
-edges = edges > 0;
-
-xx = []; yy = [];
-for i = 1:size(I, 1)
-    for j = 1:size(I, 2)
-        if edges(i, j) == 1
-            xx = [xx j];
-            yy = [yy i];
-        end
-    end
-end
-
-if numel(xx) < 50
-    warning('Too few edge pixels for circfit; returning empty mask.');
+[BW, xc, yc, R_fit, bndPoly, ~] = segment_oocyte(I, segParams, []);
+if isempty(bndPoly)
+    BW = false(size(I));
     return;
 end
 
-% 3) Circle fit
-[~, xc, yc] = circfit(xx, yy);
+% --- Compute curvature from boundary (polar polynomial fit) ---
+[RADIUS, poly, param, param2, r_theta_p, r_theta_p2, theta_boundary, RRrow] = ...
+    compute_curvature_from_boundary(bndPoly, xc, yc, theta, polyOrder, nBoundary);
 
-% 4) Polar coordinates
-nPts = numel(xx);
-r = zeros(1, nPts);
-angle = zeros(1, nPts);
-
-for kk = 1:nPts
-    r(kk) = norm([xx(kk) - xc, yy(kk) - yc]);
-    if yy(kk) > yc
-        angle(kk) = acos(dot(([xx(kk) - xc, yy(kk) - yc]) / norm([xx(kk) - xc, yy(kk) - yc]), [1 0]));
-    else
-        angle(kk) = 2*pi - acos(dot(([xx(kk) - xc, yy(kk) - yc]) / norm([xx(kk) - xc, yy(kk) - yc]), [1 0]));
-    end
-end
-
-% 5) FIRST PASS: polynomial fit
-RRrow = nan(1, nBoundary);
-
-param = polyfit(angle, r, polyOrder);
-xgrid = linspace(0, 2*pi, nBoundary);
-y1 = polyval(param, xgrid);
-
-r_theta_p = polyder(param);
-r_2theta_p = polyder(r_theta_p);
-r_theta = polyval(r_theta_p, xgrid);
-r_2theta = polyval(r_2theta_p, xgrid);
-
-% Curvature for middle half
-for ii = (length(theta)-1)/2 - (length(theta)-1)/4 : (length(theta)-1)/2 + (length(theta)-1)/4
-    sel = xgrid > theta(ii) & xgrid < theta(ii+1);
-    if any(sel)
-        num = ((y1(sel).^2 + r_theta(sel).^2).^(3/2));
-        den = abs(y1(sel).^2 + 2*r_theta(sel).^2 - y1(sel).*r_2theta(sel));
-        RADIUS(ii) = mean(num ./ max(den, eps));
-    end
-end
-
-RRrow(126:375) = y1(126:375);
-
-% 6) SECOND PASS for wrap-around
-[angle2, Iord] = sort(angle);
-r2 = r(Iord);
-
-angle2 = angle2 + pi;
-angle2(angle2 > 2*pi) = angle2(angle2 > 2*pi) - 2*pi;
-
-param2 = polyfit(angle2, r2, polyOrder);
-x2 = linspace(0, 2*pi, nBoundary);
-y2 = polyval(param2, x2);
-
-r_theta_p2 = polyder(param2);
-r_2theta_p2 = polyder(r_theta_p2);
-r_theta2 = polyval(r_theta_p2, x2);
-r_2theta2 = polyval(r_2theta_p2, x2);
-
-x2 = x2 - pi;
-x2(x2 < 0) = 2*pi + x2(x2 < 0);
-
-y2 = circshift(y2, nBoundary/2);
-
-RRrow(1:125) = y2(1:125);
-RRrow(376:500) = y2(376:500);
-
-% Curvature for remaining quarters
-for ii = 1:(length(theta)-1)/2 - (length(theta)-1)/4
-    sel = x2 > theta(ii) & x2 < theta(ii+1);
-    if any(sel)
-        num = ((y2(sel).^2 + r_theta2(sel).^2).^(3/2));
-        den = abs(y2(sel).^2 + 2*r_theta2(sel).^2 - y2(sel).*r_2theta2(sel));
-        RADIUS(ii) = mean(num ./ max(den, eps));
-    end
-end
-
-for ii = (length(theta)-1)/2 + (length(theta)-1)/4 : length(theta)-1
-    sel = x2 > theta(ii) & x2 < theta(ii+1);
-    if any(sel)
-        num = ((y2(sel).^2 + r_theta2(sel).^2).^(3/2));
-        den = abs(y2(sel).^2 + 2*r_theta2(sel).^2 - y2(sel).*r_2theta2(sel));
-        RADIUS(ii) = mean(num ./ max(den, eps));
-    end
-end
-
-% 7) Reconstruct boundary
-theta_boundary = linspace(0, 2*pi, nBoundary);
-XX = RRrow .* cos(theta_boundary) + xc;
-YY = RRrow .* sin(theta_boundary) + yc;
-
-XX = min(max(XX, 1), W);
-YY = min(max(YY, 1), H);
-
-BW = poly2mask(XX, YY, H, W);
+% Clamp to image bounds and rebuild mask
+poly(:,1) = min(max(poly(:,1), 1), W);
+poly(:,2) = min(max(poly(:,2), 1), H);
+BW = poly2mask(poly(:,1), poly(:,2), H, W);
 BW = imfill(BW, 'holes');
 
-poly = [XX(:) YY(:)];
-
 % =========================================================================
-% NEW: COMPUTE ANALYTICAL TANGENTS
+% COMPUTE ANALYTICAL TANGENTS from polynomial derivatives
 % =========================================================================
 % For a polar curve r(theta), the tangent direction is:
 %   dx/dtheta = r'(theta)*cos(theta) - r(theta)*sin(theta)
 %   dy/dtheta = r'(theta)*sin(theta) + r(theta)*cos(theta)
 %
-% We need to use the appropriate polynomial for each region:
+% We use the appropriate polynomial for each region:
 %   - Middle region (indices 126:375): use param (first pass)
 %   - Edge regions (1:125, 376:500): use param2 (second pass)
 
@@ -885,7 +779,6 @@ tx(middle_idx) = dx_mid ./ mag_mid;
 ty(middle_idx) = dy_mid ./ mag_mid;
 
 % Edge regions: use second pass polynomial (param2)
-% Need to shift theta by pi for the second pass polynomial
 edge_idx = [1:125, 376:500];
 theta_edge = theta_boundary(edge_idx);
 
@@ -896,8 +789,7 @@ theta_edge_shifted(theta_edge_shifted > 2*pi) = theta_edge_shifted(theta_edge_sh
 r_edge = polyval(param2, theta_edge_shifted);
 r_prime_edge = polyval(r_theta_p2, theta_edge_shifted);
 
-% Compute tangent in the shifted coordinate system, then transform back
-% The tangent direction in original theta is still computed using original theta
+% Tangent direction in original theta coordinates
 dx_edge = r_prime_edge .* cos(theta_edge) - r_edge .* sin(theta_edge);
 dy_edge = r_prime_edge .* sin(theta_edge) + r_edge .* cos(theta_edge);
 mag_edge = sqrt(dx_edge.^2 + dy_edge.^2) + eps;
