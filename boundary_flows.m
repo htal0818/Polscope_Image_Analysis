@@ -963,25 +963,20 @@ fprintf('  - MeanVorticity: Global mean vorticity in cortical band (1/s)\n');
 function [BW, stats, poly, RADIUS, xc, yc] = make_oocyte_mask_curvature(I, ...
     sigmaBlur, threshFrac, se, polyOrder, nBoundary, theta, ...
     minAreaFrac, maxEccentric, minSolidity, centerHint)
-% Curvature-based oocyte boundary reconstruction (adapted from kymograph.m).
-% Methodology matches SCW_flows_curvature.m for strict physical encoding.
+% Oocyte boundary segmentation using contour_retardance pipeline + curvature.
 %
-% Steps:
-% 1) Coarse threshold mask (darker oocyte on brighter background)
-% 2) Edge detection on coarse mask
-% 3) Circle fit to get center (xc, yc) - optionally using centerHint
-% 4) Polar coordinate transformation r(theta) for edge points
-% 5) Polynomial fit of r(theta) with wrap-around handling (two passes)
-% 6) Curvature calculation from polar curve
-% 7) Reconstruct smooth boundary polygon
+% Uses segment_oocyte.m for mask detection (adaptive threshold + morphological
+% cleanup + bwboundaries), then compute_curvature_from_boundary.m for polar
+% polynomial curvature computation. QC checks preserved from original.
 %
-% centerHint (optional): [xc_prev, yc_prev] from previous frame for faster init
+% centerHint (optional): [xc_prev, yc_prev] from previous frame (unused now,
+% kept for signature compatibility)
 
 [H, W] = size(I);
 
 % Handle optional centerHint parameter
 if nargin < 11 || isempty(centerHint)
-    centerHint = [W/2, H/2];  % default: image center
+    centerHint = [W/2, H/2];
 end
 
 % Default outputs
@@ -989,148 +984,37 @@ BW = false(size(I));
 stats = [];
 poly = [];
 RADIUS = nan(1, numel(theta)-1);
-xc = centerHint(1); yc = centerHint(2);  % Use hint as initial guess
+xc = centerHint(1); yc = centerHint(2);
 
-% 1) Coarse threshold mask
-Iblur = imgaussfilt(I, sigmaBlur);
-BW0 = Iblur < (threshFrac * mean2(Iblur));
-BW0 = imdilate(BW0, se);
-BW0 = imfill(BW0, 'holes');
-BW0 = imerode(BW0, se);
+% --- Segmentation via contour_retardance pipeline ---
+segParams.sigmaBlur            = sigmaBlur;
+segParams.closeRadius          = 1;
+segParams.minArea              = 5000;
+segParams.thresholdMode        = 'adaptive';
+segParams.segFromMask          = true;
+segParams.adaptSensitivity     = 0.7;
+segParams.adaptNeighborhood    = 201;
+segParams.edgeMethod           = 'Sobel';
+segParams.edgeDilateRadius     = 2;
+segParams.gradientPercentile   = 70;
+segParams.useCaching           = false;  % caching handled by caller
 
-% Keep largest connected component
-labels = bwlabel(BW0);
-if max(labels(:)) == 0
-    return;  % no regions found
-end
-Area = zeros(1, max(labels(:)));
-for i = 1:max(labels(:))
-    temp = regionprops(labels == i, 'Area');
-    Area(i) = temp.Area;
-end
-mask = labels == find(Area == max(Area), 1);
-BW0 = mask;
-
-% 2) Edge pixels of coarse mask
-edges = imgradient(BW0);
-edges = edges > 0;
-
-% Extract edge pixel coordinates
-xx = []; yy = [];
-for i = 1:size(I, 1)
-    for j = 1:size(I, 2)
-        if edges(i, j) == 1
-            xx = [xx j];
-            yy = [yy i];
-        end
-    end
-end
-
-if numel(xx) < 50
-    warning('Too few edge pixels for circfit; returning empty mask.');
+[BW, xc, yc, R_fit, bndPoly, ~] = segment_oocyte(I, segParams, []);
+if isempty(bndPoly)
+    BW = false(size(I));
+    stats = [];
+    poly = [];
     return;
 end
 
-% 3) Circle fit to get center (uses circfit.m from codebase)
-[R, xc, yc] = circfit(xx, yy);
+% --- Compute curvature from boundary (polar polynomial fit) ---
+[RADIUS, poly] = compute_curvature_from_boundary(bndPoly, xc, yc, theta, polyOrder, nBoundary);
 
-% 4) Compute r and angle for each edge point (polar coordinates)
-nPts = numel(xx);
-r = zeros(1, nPts);
-angle = zeros(1, nPts);
-
-for kk = 1:nPts
-    r(kk) = norm([xx(kk) - xc, yy(kk) - yc]);
-
-    % Angle calculation matching kymograph.m methodology
-    if yy(kk) > yc
-        angle(kk) = acos(dot(([xx(kk) - xc, yy(kk) - yc]) / norm([xx(kk) - xc, yy(kk) - yc]), [1 0]));
-    else
-        angle(kk) = 2*pi - acos(dot(([xx(kk) - xc, yy(kk) - yc]) / norm([xx(kk) - xc, yy(kk) - yc]), [1 0]));
-    end
-end
-
-% 5) FIRST PASS: fit r(angle) and fill middle half of RR
-RRrow = nan(1, nBoundary);
-
-param = polyfit(angle, r, polyOrder);
-xgrid = linspace(0, 2*pi, nBoundary);
-y1 = polyval(param, xgrid);
-
-r_theta_p = polyder(param);
-r_2theta_p = polyder(r_theta_p);
-r_theta = polyval(r_theta_p, xgrid);
-r_2theta = polyval(r_2theta_p, xgrid);
-
-% Curvature calculation for middle half (bins 26-75 for 101 theta bins)
-for ii = (length(theta)-1)/2 - (length(theta)-1)/4 : (length(theta)-1)/2 + (length(theta)-1)/4
-    sel = xgrid > theta(ii) & xgrid < theta(ii+1);
-    if any(sel)
-        num = ((y1(sel).^2 + r_theta(sel).^2).^(3/2));
-        den = abs(y1(sel).^2 + 2*r_theta(sel).^2 - y1(sel).*r_2theta(sel));
-        RADIUS(ii) = mean(num ./ max(den, eps));
-    end
-end
-
-RRrow(126:375) = y1(126:375);
-
-% 6) SECOND PASS: sort and shift by pi to handle wrap-around
-[angle2, Iord] = sort(angle);
-r2 = r(Iord);
-
-angle2 = angle2 + pi;
-angle2(angle2 > 2*pi) = angle2(angle2 > 2*pi) - 2*pi;
-
-param2 = polyfit(angle2, r2, polyOrder);
-x2 = linspace(0, 2*pi, nBoundary);
-y2 = polyval(param2, x2);
-
-r_theta_p2 = polyder(param2);
-r_2theta_p2 = polyder(r_theta_p2);
-r_theta2 = polyval(r_theta_p2, x2);
-r_2theta2 = polyval(r_2theta_p2, x2);
-
-x2 = x2 - pi;
-x2(x2 < 0) = 2*pi + x2(x2 < 0);
-
-y2 = circshift(y2, nBoundary/2);
-
-RRrow(1:125) = y2(1:125);
-RRrow(376:500) = y2(376:500);
-
-% Curvature for remaining quarters
-for ii = 1:(length(theta)-1)/2 - (length(theta)-1)/4
-    sel = x2 > theta(ii) & x2 < theta(ii+1);
-    if any(sel)
-        num = ((y2(sel).^2 + r_theta2(sel).^2).^(3/2));
-        den = abs(y2(sel).^2 + 2*r_theta2(sel).^2 - y2(sel).*r_2theta2(sel));
-        RADIUS(ii) = mean(num ./ max(den, eps));
-    end
-end
-
-for ii = (length(theta)-1)/2 + (length(theta)-1)/4 : length(theta)-1
-    sel = x2 > theta(ii) & x2 < theta(ii+1);
-    if any(sel)
-        num = ((y2(sel).^2 + r_theta2(sel).^2).^(3/2));
-        den = abs(y2(sel).^2 + 2*r_theta2(sel).^2 - y2(sel).*r_2theta2(sel));
-        RADIUS(ii) = mean(num ./ max(den, eps));
-    end
-end
-
-% 7) Reconstruct final smooth boundary from RR
-xfinal = linspace(0, 2*pi, nBoundary);
-XX = RRrow .* cos(xfinal) + xc;
-YY = RRrow .* sin(xfinal) + yc;
-
-% Clamp to image bounds for poly2mask stability
-XX = min(max(XX, 1), W);
-YY = min(max(YY, 1), H);
-
-% Build final mask from reconstructed smooth boundary
-BW = poly2mask(XX, YY, H, W);
+% Clamp to image bounds and rebuild mask from smooth curvature boundary
+poly(:,1) = min(max(poly(:,1), 1), W);
+poly(:,2) = min(max(poly(:,2), 1), H);
+BW = poly2mask(poly(:,1), poly(:,2), H, W);
 BW = imfill(BW, 'holes');
-
-poly = [XX(:) YY(:)];
 
 % QC: check plausibility
 st = regionprops(BW, 'Area', 'Eccentricity', 'Centroid', 'Solidity');
