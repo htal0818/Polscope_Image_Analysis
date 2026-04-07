@@ -38,8 +38,8 @@ if useFourStates
     d2 = dir(s2); d3 = dir(s3); d4 = dir(s4);
 end
 
-% --- PIVlab output .mat file ---
-pivMatFile = '/Users/hridaytalreja/Desktop/Jan_data_2026/jan_20_2026_FSW_and_eggs_50msexp_15sint_20x_50nmceiling/eggs/SMS_2026_0120_1518_1/Pos0/Jan21_2026_PIV/PIVlab_output.mat';
+% --- PIVlab data: read from workspace (run PIVlab first) ---
+% Expects: u_original, v_original, x, y in workspace
 
 % --- Optional crop (match your workflows) ---
 doCrop = true;
@@ -120,9 +120,8 @@ makeSnapshotPlots = true;       % Create detailed snapshot visualizations
 snapshotFrames = [];            % Specific frames to visualize (empty = auto-select)
 snapshotEveryNFrames = 2;       % Save tangential flow analysis every N frames
 
-%% ========================== LOAD PIV DATA =================================
-S = load(pivMatFile);
-[Xc, Yc, Uc, Vc] = pickPIVFields(S);
+%% ========================== PIV DATA FROM WORKSPACE ======================
+Uc = u_original; Vc = v_original; Xc = x; Yc = y;
 
 nFramesPIV = numel(Uc);
 nFramesImg = numel(d1);
