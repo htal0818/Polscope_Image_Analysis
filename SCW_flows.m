@@ -80,6 +80,7 @@ segParams.useCaching           = true;
 segParams.cacheIntensityThreshold = 0.02;
 segParams.cacheForceRecalcEveryN  = 25;
 segCache = [];
+maskErodePx = 15;  % erode mask by N px before PIV masking (exclude edge vectors)
 
 %% =================== Containers =========================================
 BW_seq     = cell(nFrames,1);
@@ -119,12 +120,18 @@ for t = 150:nFrames
 
     % ---------- Map entire contour area to PIV nodes ----------
     X = Xc{t}; Y = Yc{t};
-    if ~isempty(poly)
-        polyC = poly;
-        if ~isequal(polyC(1,:), polyC(end,:)), polyC(end+1,:) = polyC(1,:); end
-        INgrid = reshape(inpolygon(X(:), Y(:), polyC(:,1), polyC(:,2)), size(X));
+
+    % Erode mask so PIV nodes near the edge are excluded
+    BW_eroded = imerode(BW_final, strel('disk', maskErodePx));
+    B_eroded  = bwboundaries(BW_eroded);
+    if ~isempty(B_eroded)
+        [~, iLong] = max(cellfun(@(p) size(p,1), B_eroded));
+        bE = B_eroded{iLong};
+        polyMask = [bE(:,2), bE(:,1)];   % [x, y]
+        if ~isequal(polyMask(1,:), polyMask(end,:)), polyMask(end+1,:) = polyMask(1,:); end
+        INgrid = reshape(inpolygon(X(:), Y(:), polyMask(:,1), polyMask(:,2)), size(X));
     else
-        INgrid = false(size(X));   % blank if we couldn't get a polygon
+        INgrid = false(size(X));
     end
     INgridSeq{t} = INgrid;
 
