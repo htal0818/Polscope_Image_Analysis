@@ -1097,6 +1097,11 @@ theta_poly = wrapTo2Pi(theta_poly);
 xb_sorted = xb(sort_idx);
 yb_sorted = yb(sort_idx);
 
+% Remove duplicate angles (interp1 requires unique sample points)
+[theta_sorted, uniq_idx] = unique(theta_sorted, 'stable');
+xb_sorted = xb_sorted(uniq_idx);
+yb_sorted = yb_sorted(uniq_idx);
+
 % Handle wrap-around by extending data
 theta_extended = [theta_sorted - 2*pi; theta_sorted; theta_sorted + 2*pi];
 xb_extended = [xb_sorted; xb_sorted; xb_sorted];
