@@ -962,11 +962,10 @@ fprintf('  - MeanVorticity: Global mean vorticity in cortical band (1/s)\n');
 function [BW, stats, poly, RADIUS, xc, yc] = make_oocyte_mask_curvature(I, ...
     sigmaBlur, threshFrac, se, polyOrder, nBoundary, theta, ...
     minAreaFrac, maxEccentric, minSolidity, centerHint)
-% Oocyte boundary segmentation using contour_retardance pipeline + curvature.
+% Oocyte boundary segmentation using contour_retardance pipeline.
 %
 % Uses segment_oocyte.m for mask detection (adaptive threshold + morphological
-% cleanup + bwboundaries), then compute_curvature_from_boundary.m for polar
-% polynomial curvature computation. QC checks preserved from original.
+% cleanup + bwboundaries). Curvature is not computed (RADIUS = NaN).
 %
 % centerHint (optional): [xc_prev, yc_prev] from previous frame (unused now,
 % kept for signature compatibility)
@@ -1006,14 +1005,8 @@ if isempty(bndPoly)
     return;
 end
 
-% --- Compute curvature from boundary (polar polynomial fit) ---
-[RADIUS, poly] = compute_curvature_from_boundary(bndPoly, xc, yc, theta, polyOrder, nBoundary);
-
-% Clamp to image bounds and rebuild mask from smooth curvature boundary
-poly(:,1) = min(max(poly(:,1), 1), W);
-poly(:,2) = min(max(poly(:,2), 1), H);
-BW = poly2mask(poly(:,1), poly(:,2), H, W);
-BW = imfill(BW, 'holes');
+% Use boundary polygon directly from segment_oocyte (no curvature computation)
+poly = bndPoly;
 
 % QC: check plausibility
 st = regionprops(BW, 'Area', 'Eccentricity', 'Centroid', 'Solidity');

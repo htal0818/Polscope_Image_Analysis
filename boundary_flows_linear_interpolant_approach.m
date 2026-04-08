@@ -698,15 +698,15 @@ fprintf('  - normalOffsetPx: %d pixels inward from boundary\n', normalOffsetPx);
 function [BW, stats, poly, RADIUS, xc, yc, tx, ty, theta_boundary] = ...
     make_oocyte_mask_with_tangents(I, sigmaBlur, threshFrac, se, polyOrder, ...
     nBoundary, theta, minAreaFrac, maxEccentric, minSolidity, centerHint)
-% Oocyte boundary segmentation using contour_retardance pipeline + curvature
-% + analytical tangent computation.
+% Oocyte boundary segmentation using contour_retardance pipeline
+% + finite-difference tangent computation.
 %
-% Uses segment_oocyte.m for mask detection, compute_curvature_from_boundary.m
-% for polar polynomial curvature, then computes analytical tangent vectors
-% from the polynomial derivatives.
+% Uses segment_oocyte.m for mask detection. Tangent vectors are computed
+% from finite differences on the boundary polygon. Curvature is not
+% computed (RADIUS = NaN).
 %
 % Outputs:
-%   tx, ty - unit tangent vectors at each boundary point (analytical)
+%   tx, ty - unit tangent vectors at each boundary point
 %   theta_boundary - theta values at each boundary point
 
 [H, W] = size(I);
@@ -742,63 +742,19 @@ if isempty(bndPoly)
     return;
 end
 
-% --- Compute curvature from boundary (polar polynomial fit) ---
-[RADIUS, poly, param, param2, r_theta_p, r_theta_p2, theta_boundary, RRrow] = ...
-    compute_curvature_from_boundary(bndPoly, xc, yc, theta, polyOrder, nBoundary);
+% Use boundary polygon directly from segment_oocyte
+poly = bndPoly;
 
-% Clamp to image bounds and rebuild mask
-poly(:,1) = min(max(poly(:,1), 1), W);
-poly(:,2) = min(max(poly(:,2), 1), H);
-BW = poly2mask(poly(:,1), poly(:,2), H, W);
-BW = imfill(BW, 'holes');
+% Tangent vectors via finite differences on boundary polygon
+dx = gradient(poly(:,1));
+dy = gradient(poly(:,2));
+mag = sqrt(dx.^2 + dy.^2) + eps;
+tx = dx ./ mag;
+ty = dy ./ mag;
 
-% =========================================================================
-% COMPUTE ANALYTICAL TANGENTS from polynomial derivatives
-% =========================================================================
-% For a polar curve r(theta), the tangent direction is:
-%   dx/dtheta = r'(theta)*cos(theta) - r(theta)*sin(theta)
-%   dy/dtheta = r'(theta)*sin(theta) + r(theta)*cos(theta)
-%
-% We use the appropriate polynomial for each region:
-%   - Middle region (indices 126:375): use param (first pass)
-%   - Edge regions (1:125, 376:500): use param2 (second pass)
-
-tx = zeros(nBoundary, 1);
-ty = zeros(nBoundary, 1);
-
-% Middle region: use first pass polynomial (param)
-middle_idx = 126:375;
-theta_mid = theta_boundary(middle_idx);
-r_mid = polyval(param, theta_mid);
-r_prime_mid = polyval(r_theta_p, theta_mid);
-
-dx_mid = r_prime_mid .* cos(theta_mid) - r_mid .* sin(theta_mid);
-dy_mid = r_prime_mid .* sin(theta_mid) + r_mid .* cos(theta_mid);
-mag_mid = sqrt(dx_mid.^2 + dy_mid.^2) + eps;
-tx(middle_idx) = dx_mid ./ mag_mid;
-ty(middle_idx) = dy_mid ./ mag_mid;
-
-% Edge regions: use second pass polynomial (param2)
-edge_idx = [1:125, 376:500];
-theta_edge = theta_boundary(edge_idx);
-
-% Shift theta for param2 evaluation (param2 was fit with angles shifted by pi)
-theta_edge_shifted = theta_edge + pi;
-theta_edge_shifted(theta_edge_shifted > 2*pi) = theta_edge_shifted(theta_edge_shifted > 2*pi) - 2*pi;
-
-r_edge = polyval(param2, theta_edge_shifted);
-r_prime_edge = polyval(r_theta_p2, theta_edge_shifted);
-
-% Tangent direction in original theta coordinates
-dx_edge = r_prime_edge .* cos(theta_edge) - r_edge .* sin(theta_edge);
-dy_edge = r_prime_edge .* sin(theta_edge) + r_edge .* cos(theta_edge);
-mag_edge = sqrt(dx_edge.^2 + dy_edge.^2) + eps;
-tx(edge_idx) = dx_edge ./ mag_edge;
-ty(edge_idx) = dy_edge ./ mag_edge;
-
-% =========================================================================
-% END ANALYTICAL TANGENTS
-% =========================================================================
+% Theta at each boundary point (relative to center)
+theta_boundary = atan2(poly(:,2) - yc, poly(:,1) - xc)';
+theta_boundary(theta_boundary < 0) = theta_boundary(theta_boundary < 0) + 2*pi;
 
 % QC
 st = regionprops(BW, 'Area', 'Eccentricity', 'Centroid', 'Solidity');
