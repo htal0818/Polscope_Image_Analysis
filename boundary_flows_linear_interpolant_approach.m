@@ -743,9 +743,24 @@ if isempty(bndPoly)
 end
 
 % Use boundary polygon directly from segment_oocyte
-poly = bndPoly;
+% Resample to exactly nBoundary points via arclength interpolation
+xb = bndPoly(:,1);
+yb = bndPoly(:,2);
+% Close boundary if not already closed
+if ~isequal([xb(1) yb(1)], [xb(end) yb(end)])
+    xb = [xb; xb(1)];
+    yb = [yb; yb(1)];
+end
+ds = hypot(diff(xb), diff(yb));
+s  = [0; cumsum(ds)];
+sQuery = linspace(0, s(end), nBoundary + 1)';
+sQuery = sQuery(1:end-1);  % exclude duplicate endpoint
+% Remove duplicate arclength values before interpolation
+[s_uniq, uniq_idx] = unique(s, 'stable');
+poly = [interp1(s_uniq, xb(uniq_idx), sQuery, 'linear'), ...
+        interp1(s_uniq, yb(uniq_idx), sQuery, 'linear')];
 
-% Tangent vectors via finite differences on boundary polygon
+% Tangent vectors via finite differences on resampled boundary polygon
 dx = gradient(poly(:,1));
 dy = gradient(poly(:,2));
 mag = sqrt(dx.^2 + dy.^2) + eps;
