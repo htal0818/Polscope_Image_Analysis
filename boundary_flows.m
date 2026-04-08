@@ -1005,20 +1005,8 @@ if isempty(bndPoly)
     return;
 end
 
-% Resample boundary to exactly nBoundary points via arclength interpolation
-xb = bndPoly(:,1);
-yb = bndPoly(:,2);
-if ~isequal([xb(1) yb(1)], [xb(end) yb(end)])
-    xb = [xb; xb(1)];
-    yb = [yb; yb(1)];
-end
-ds = hypot(diff(xb), diff(yb));
-s  = [0; cumsum(ds)];
-sQuery = linspace(0, s(end), nBoundary + 1)';
-sQuery = sQuery(1:end-1);
-[s_uniq, uniq_idx] = unique(s, 'stable');
-poly = [interp1(s_uniq, xb(uniq_idx), sQuery, 'linear'), ...
-        interp1(s_uniq, yb(uniq_idx), sQuery, 'linear')];
+% Use boundary polygon directly from segment_oocyte (native resolution)
+poly = bndPoly;
 
 % QC: check plausibility
 st = regionprops(BW, 'Area', 'Eccentricity', 'Centroid', 'Solidity');

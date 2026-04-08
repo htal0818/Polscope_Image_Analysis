@@ -60,7 +60,7 @@ sigmaBlur       = 1.0;           % pre-blur (pixels)
 threshFrac      = 0.85;          % mask = I < threshFrac*mean2(I)
 se              = strel('diamond',5);
 polyOrder       = 50;            % polyfit order for r(theta)
-nBoundary       = 500;           % samples along boundary (NO upsampling needed now)
+nBoundary       = 500;           % kept for signature compatibility (boundary uses native resolution)
 
 % --- Theta binning for output compatibility ---
 % Note: With analytical approach, we have 500 direct values at known theta
@@ -116,9 +116,9 @@ nFrames = min(nFramesPIV, nFramesImg);
 fprintf('Frames: images=%d, piv=%d, using=%d\n', nFramesImg, nFramesPIV, nFrames);
 
 %% ========================== PREALLOCATE ===================================
-% Raw tangential velocity at 500 boundary points (no binning)
-Vtheta_raw = nan(nFrames, nBoundary);       % tangential velocity at each boundary point
-Theta_raw = nan(nFrames, nBoundary);        % theta values for each boundary point
+% Raw tangential velocity at each boundary point (variable length per frame)
+Vtheta_raw = cell(nFrames, 1);
+Theta_raw  = cell(nFrames, 1);
 
 % Binned output (for compatibility with original approach)
 Vtheta_kymo = nan(nFrames, nThetaBins);
@@ -277,9 +277,9 @@ for fr = 1:nFrames
         normalOffsetPx, nThetaBins, thetaBinEdges, ...
         px_per_um, dt_sec, pivVelUnit);
 
-    % Store raw (500 points) and binned outputs
-    Vtheta_raw(fr,:) = vT_raw;
-    Theta_raw(fr,:) = theta_raw;
+    % Store raw (variable-length) and binned outputs
+    Vtheta_raw{fr} = vT_raw;
+    Theta_raw{fr} = theta_raw;
     Vtheta_kymo(fr,:) = vBins;
     Npts_kymo(fr,:)   = nBinsCount;
 
@@ -303,7 +303,8 @@ for fr = 1:nFrames
         plot(poly(:,1), poly(:,2), 'c-', 'LineWidth', 2);
         scatter(dbgFlow.sampleX, dbgFlow.sampleY, 8, 'r', 'filled');
         % Show tangent vectors at a few points
-        subsamp = 1:20:nBoundary;
+        nPts = size(poly,1);
+        subsamp = 1:max(1,round(nPts/25)):nPts;
         quiver(poly(subsamp,1), poly(subsamp,2), tx(subsamp)*20, ty(subsamp)*20, 0, 'g', 'LineWidth', 1);
         title(sprintf('Frame %d: Boundary + Sample Points + Tangents', fr));
         legend({'Boundary', 'Sample pts', 'Tangents'}, 'Location', 'best');
@@ -333,16 +334,24 @@ time_min = (0:nFrames-1) * (dt_sec/60);
 
 fprintf('Generating visualizations...\n');
 
-% --- 1) RAW TANGENTIAL VELOCITY (500 points, no binning) ---
+% --- 1) RAW TANGENTIAL VELOCITY (variable-length, interpolated to common grid) ---
+nRawDisplay = 500;  % display resolution for raw kymograph
+Vtheta_raw_grid = nan(nFrames, nRawDisplay);
+for fr = 1:nFrames
+    vr = Vtheta_raw{fr};
+    if ~isempty(vr)
+        Vtheta_raw_grid(fr,:) = interp1(linspace(0,1,numel(vr)), vr, linspace(0,1,nRawDisplay), 'linear');
+    end
+end
 fig0 = figure('Position', [100 100 1200 600]);
 subplot(1,2,1);
-imagesc(1:nBoundary, time_min, Vtheta_raw);
+imagesc(1:nRawDisplay, time_min, Vtheta_raw_grid);
 axis tight;
 xlabel('Boundary Point Index', 'FontSize', 12);
 ylabel('Time (min)', 'FontSize', 12);
-title('Raw Tangential Velocity (500 pts, analytical tangents)', 'FontSize', 12);
+title('Raw Tangential Velocity (native resolution)', 'FontSize', 12);
 colormap(gca, redblue(256));
-vmax = max(abs(Vtheta_raw(:)), [], 'omitnan');
+vmax = max(abs(Vtheta_raw_grid(:)), [], 'omitnan');
 if ~isnan(vmax) && vmax > 0; clim([-vmax, vmax]); end
 cb = colorbar; ylabel(cb, 'v_\theta (\mum/s)', 'FontSize', 11);
 
@@ -568,7 +577,7 @@ if makeSnapshotPlots
         xc = centroidXY(fr, 1);
         yc = centroidXY(fr, 2);
         vtheta = Vtheta_kymo(fr, :);
-        vtheta_raw = Vtheta_raw(fr, :);
+        vtheta_raw = Vtheta_raw{fr};
         radius_curv = RADIUS_OF_CURVATURE(fr, :);
         vort = Vorticity_kymo(fr, :);
 
@@ -581,13 +590,14 @@ if makeSnapshotPlots
         plot(xc, yc, 'r+', 'MarkerSize', 12, 'LineWidth', 2);
         title(sprintf('Frame %d (t=%.2f min)', fr, time_min(fr)));
 
-        % Panel 2: RAW tangential velocity (500 pts - key difference!)
+        % Panel 2: RAW tangential velocity (native boundary pts)
         subplot(3,3,2);
-        plot(1:nBoundary, vtheta_raw, 'b-', 'LineWidth', 1);
+        nPtsRaw = numel(vtheta_raw);
+        plot(1:nPtsRaw, vtheta_raw, 'b-', 'LineWidth', 1);
         hold on; yline(0, 'k--', 'LineWidth', 0.5);
         xlabel('Boundary Point'); ylabel('v_\theta (\mum/s)');
-        title('RAW Tangential (500 pts, analytical)');
-        grid on; xlim([1 nBoundary]); ylim(ylim_vtheta);
+        title(sprintf('RAW Tangential (%d pts)', nPtsRaw));
+        grid on; xlim([1 max(nPtsRaw,1)]); ylim(ylim_vtheta);
 
         % Panel 3: Binned tangential velocity
         subplot(3,3,3);
@@ -633,14 +643,14 @@ if makeSnapshotPlots
 
         % Panel 8: Raw vs Binned comparison
         subplot(3,3,8);
-        theta_raw_fr = Theta_raw(fr, :);
+        theta_raw_fr = Theta_raw{fr};
         scatter(theta_raw_fr, vtheta_raw, 10, 'b', 'filled', 'MarkerFaceAlpha', 0.5);
         hold on;
         plot(thetaCenters, vtheta, 'r-', 'LineWidth', 2);
         xlabel('\theta (rad)'); ylabel('v_\theta (\mum/s)');
         title('Raw (blue) vs Binned (red)');
         xlim([0, 2*pi]); ylim(ylim_vtheta);
-        legend({'Raw 500pt', 'Binned'}, 'Location', 'best');
+        legend({'Raw pts', 'Binned'}, 'Location', 'best');
 
         % Panel 9: Statistics
         subplot(3,3,9); axis off;
@@ -679,7 +689,7 @@ fprintf('All visualizations complete!\n\n');
 
 %% ========================== SAVE RESULTS ===================================
 save(fullfile(outDir,'tangential_linear_interp_results.mat'), ...
-     'Vtheta_raw', 'Theta_raw', ...  % NEW: raw 500-point data
+     'Vtheta_raw', 'Theta_raw', ...  % raw boundary-point data (cell arrays, variable length)
      'Vtheta_kymo', 'Npts_kymo', 'thetaCenters', 'thetaBinEdges', 'time_min', ...
      'centroidXY', 'areaMask', 'qcFlag', 'RADIUS_OF_CURVATURE', ...
      'Vorticity_kymo', 'Vorticity_field', 'MeanVorticity', ...
@@ -687,8 +697,8 @@ save(fullfile(outDir,'tangential_linear_interp_results.mat'), ...
 
 fprintf('Saved outputs to: %s\n', outDir);
 fprintf('\nLINEAR INTERPOLANT APPROACH outputs:\n');
-fprintf('  - Vtheta_raw: Raw tangential velocity at 500 boundary points\n');
-fprintf('  - Theta_raw: Theta values for each boundary point\n');
+fprintf('  - Vtheta_raw: Raw tangential velocity at boundary points (cell array, native resolution)\n');
+fprintf('  - Theta_raw: Theta values for each boundary point (cell array)\n');
 fprintf('  - Vtheta_kymo: Binned tangential velocity (for compatibility)\n');
 fprintf('  - normalOffsetPx: %d pixels inward from boundary\n', normalOffsetPx);
 
@@ -742,25 +752,10 @@ if isempty(bndPoly)
     return;
 end
 
-% Use boundary polygon directly from segment_oocyte
-% Resample to exactly nBoundary points via arclength interpolation
-xb = bndPoly(:,1);
-yb = bndPoly(:,2);
-% Close boundary if not already closed
-if ~isequal([xb(1) yb(1)], [xb(end) yb(end)])
-    xb = [xb; xb(1)];
-    yb = [yb; yb(1)];
-end
-ds = hypot(diff(xb), diff(yb));
-s  = [0; cumsum(ds)];
-sQuery = linspace(0, s(end), nBoundary + 1)';
-sQuery = sQuery(1:end-1);  % exclude duplicate endpoint
-% Remove duplicate arclength values before interpolation
-[s_uniq, uniq_idx] = unique(s, 'stable');
-poly = [interp1(s_uniq, xb(uniq_idx), sQuery, 'linear'), ...
-        interp1(s_uniq, yb(uniq_idx), sQuery, 'linear')];
+% Use boundary polygon directly from segment_oocyte (native resolution)
+poly = bndPoly;
 
-% Tangent vectors via finite differences on resampled boundary polygon
+% Tangent vectors via finite differences on boundary polygon
 dx = gradient(poly(:,1));
 dy = gradient(poly(:,2));
 mag = sqrt(dx.^2 + dy.^2) + eps;
