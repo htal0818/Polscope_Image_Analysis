@@ -71,7 +71,7 @@ bit_depth = 16;               % image bit depth (16-bit = 0..65535)
 sigmaBlur   = 20;      % Gaussian blur sigma (px) for segmentation mask
 closeRadius = 25;      % morphological close disk radius (px)
 minArea     = 5000;    % minimum object area (px^2) to reject debris
-boundaryInset_px = 10; % shift boundary inward (px) onto cortical ring center
+peakSearchDepth_um = 5;  % max depth (um) along inward normal to search for cortical peak
 
 % --- Threshold mode ---
 % 'otsu'       : automatic Otsu threshold on blurred image (default)
@@ -439,48 +439,8 @@ for fr = 1:nFrames
     xb_orig = xb;
     yb_orig = yb;
 
-    % Shrink boundary inward onto cortical ring center (for kymograph only)
-    dx = xb - xc;  dy = yb - yc;
-    dist = sqrt(dx.^2 + dy.^2);
-    shrink = max(dist - boundaryInset_px, 1) ./ dist;
-    xb = xc + dx .* shrink;
-    yb = yc + dy .* shrink;
-
-    %% ----- Retardance along the boundary (kymograph row) -----
-    % Angle of each boundary point relative to center
-    th = atan2(yb - yc, xb - xc);
-    th(th < 0) = th(th < 0) + 2*pi;
-
-    % Interpolate retardance (nm) at boundary pixel locations
+    % Interpolate retardance (nm) — used by all profiling below
     F = griddedInterpolant({1:H, 1:W}, Iret, 'linear', 'nearest');
-    ib = F(yb, xb);  % retardance in nm at each boundary point
-
-    % Bin by angle
-    bin = discretize(th, thetaBinEdges);
-    valid = ~isnan(bin);
-
-    row = nan(1, nThetaBins);
-    if any(valid)
-        sumBins = accumarray(bin(valid), ib(valid), [nThetaBins 1], @nanmean, NaN);
-        row = sumBins';
-    end
-
-    % Fill missing bins via circular interpolation
-    bad = isnan(row);
-    if any(bad) && sum(~bad) >= 2
-        goodIdx = find(~bad);
-        xw = [goodIdx - nThetaBins, goodIdx, goodIdx + nThetaBins];
-        vw = [row(goodIdx), row(goodIdx), row(goodIdx)];
-        row(bad) = interp1(xw, vw, find(bad), 'linear', 'extrap');
-    end
-
-    kymo(fr,:) = row;
-
-    %% ----- Contour retardance statistics (nm) -----
-    contourMean(fr) = mean(ib, 'omitnan');
-    contourStd(fr)  = std(ib, 'omitnan');
-    contourMax(fr)  = max(ib);
-    contourMin(fr)  = min(ib);
 
     %% ----- Angle-averaged radial profile (center outward, in nm) -----
     sampleAngles = linspace(0, 2*pi, nAngleSamples+1);
@@ -552,9 +512,13 @@ for fr = 1:nFrames
     nx(dot_check < 0) = -nx(dot_check < 0);
     ny(dot_check < 0) = -ny(dot_check < 0);
 
-    %% ----- Normal-based outside-in radial profiles -----
+    %% ----- Normal-based outside-in radial profiles + peak retardance -----
     normal_sum   = zeros(1, nDepth);
     normal_count = zeros(1, nDepth);
+
+    peakSearchIdx = find(depthAxis_um <= peakSearchDepth_um);
+    peakRetardance = nan(1, nBoundaryPts);
+    peakDepth_um   = nan(1, nBoundaryPts);
 
     for bi = 1:nBoundaryPts
         % Sample along inward normal from this boundary point
@@ -566,10 +530,45 @@ for fr = 1:nFrames
             vals = F(ys_n(inBounds), xs_n(inBounds));
             normal_sum(inBounds)   = normal_sum(inBounds)   + vals(:)';
             normal_count(inBounds) = normal_count(inBounds) + 1;
+
+            % Find peak retardance within search window
+            searchIdx = intersect(peakSearchIdx, find(inBounds));
+            if ~isempty(searchIdx)
+                searchVals = F(ys_n(searchIdx), xs_n(searchIdx));
+                [peakRetardance(bi), pidx] = max(searchVals);
+                peakDepth_um(bi) = depthAxis_um(searchIdx(pidx));
+            end
         end
     end
     validN = normal_count > 0;
     normalProfiles(fr, validN) = normal_sum(validN) ./ normal_count(validN);
+
+    %% ----- Kymograph & contour stats from peak retardance -----
+    th = atan2(polyY - yc, polyX - xc);
+    th(th < 0) = th(th < 0) + 2*pi;
+
+    bin = discretize(th, thetaBinEdges);
+    valid = ~isnan(bin) & ~isnan(peakRetardance);
+
+    row = nan(1, nThetaBins);
+    if any(valid)
+        row = accumarray(bin(valid), peakRetardance(valid)', [nThetaBins 1], @nanmean, NaN)';
+    end
+
+    % Fill missing bins via circular interpolation
+    bad = isnan(row);
+    if any(bad) && sum(~bad) >= 2
+        goodIdx = find(~bad);
+        xw = [goodIdx - nThetaBins, goodIdx, goodIdx + nThetaBins];
+        vw = [row(goodIdx), row(goodIdx), row(goodIdx)];
+        row(bad) = interp1(xw, vw, find(bad), 'linear', 'extrap');
+    end
+
+    kymo(fr,:) = row;
+    contourMean(fr) = mean(peakRetardance, 'omitnan');
+    contourStd(fr)  = std(peakRetardance, 0, 'omitnan');
+    contourMax(fr)  = max(peakRetardance);
+    contourMin(fr)  = min(peakRetardance);
 
     %% ----- Distance transform outside-in radial profiles -----
     % Reuse per and D_full from normal computation above
@@ -851,7 +850,7 @@ results.depthStep_um          = depthStep_um;
 results.sigmaBlur             = sigmaBlur;
 results.closeRadius           = closeRadius;
 results.minArea               = minArea;
-results.boundaryInset_px      = boundaryInset_px;
+results.peakSearchDepth_um    = peakSearchDepth_um;
 
 save(fullfile(outDir, 'contour_retardance_results.mat'), '-struct', 'results');
 fprintf('Saved results to: %s\n', fullfile(outDir, 'contour_retardance_results.mat'));
