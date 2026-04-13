@@ -810,6 +810,35 @@ exportgraphics(fig9, fullfile(outDir, 'comparison_normal_vs_dist.png'), 'Resolut
 savefig(fig9, fullfile(outDir, 'comparison_normal_vs_dist.fig'));
 close(fig9);
 
+% --- Plot 10: Peak retardance of radial/normal profiles over time ---
+[peakNormal_nm, iN]   = max(normalProfiles, [], 2, 'omitnan');
+[peakRadial_nm, iR]   = max(radialProfiles_trim, [], 2, 'omitnan');
+peakNormalDepth_um    = depthAxis_um(iN);
+peakRadialRadius_um   = radialAxis_um_trim(iR);
+
+fig10 = figure('Position', [100 100 900 600]);
+subplot(2,1,1);
+plot(time_min, peakNormal_nm, 'b-', 'LineWidth', 1.5, 'DisplayName', 'Normal profile peak'); hold on;
+plot(time_min, peakRadial_nm, 'r-', 'LineWidth', 1.5, 'DisplayName', 'Radial profile peak');
+xlabel('Time (min)', 'FontSize', 12);
+ylabel('Peak retardance (nm)', 'FontSize', 12);
+title('Peak Retardance of Angle-Averaged Profiles Over Time', 'FontSize', 13);
+grid on;
+legend('show', 'Location', 'best', 'FontSize', 10);
+
+subplot(2,1,2);
+plot(time_min, peakNormalDepth_um, 'b-', 'LineWidth', 1.5, 'DisplayName', 'Normal peak depth (from cortex)'); hold on;
+plot(time_min, peakRadialRadius_um, 'r-', 'LineWidth', 1.5, 'DisplayName', 'Radial peak radius (from center)');
+xlabel('Time (min)', 'FontSize', 12);
+ylabel('Location (\mum)', 'FontSize', 12);
+title('Location of Profile Peak Over Time', 'FontSize', 13);
+grid on;
+legend('show', 'Location', 'best', 'FontSize', 10);
+
+exportgraphics(fig10, fullfile(outDir, 'profile_peak_vs_time.png'), 'Resolution', 200);
+savefig(fig10, fullfile(outDir, 'profile_peak_vs_time.fig'));
+close(fig10);
+
 %% ========================== SAVE DATA =====================================
 results = struct();
 results.kymo                  = kymo;
@@ -824,6 +853,10 @@ results.contourMean_nm        = contourMean;
 results.contourStd_nm         = contourStd;
 results.contourMax_nm         = contourMax;
 results.contourMin_nm         = contourMin;
+results.peakNormal_nm         = peakNormal_nm;
+results.peakRadial_nm         = peakRadial_nm;
+results.peakNormalDepth_um    = peakNormalDepth_um;
+results.peakRadialRadius_um   = peakRadialRadius_um;
 results.centroidXY            = centroidXY;
 results.meanRadius_px         = meanRadius_px;
 results.meanRadius_um         = meanRadius_px * um_per_px;
