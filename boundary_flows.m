@@ -1223,21 +1223,6 @@ switch lower(strtrim(pivVelUnit))
 end
 end
 
-function [U_um_s, V_um_s] = convertVelToUmPerSec(U, V, pivVelUnit, px_per_um, dt_sec)
-% Convert PIV velocities to um/s (micrometers per second).
-% Sibling of convertVelToNmPerSec; used by compute_vorticity_from_PIV.
-switch lower(strtrim(pivVelUnit))
-    case 'px_per_frame'
-        U_um_s = (U / px_per_um) / dt_sec;
-        V_um_s = (V / px_per_um) / dt_sec;
-    case 'px_per_sec'
-        U_um_s = (U / px_per_um);
-        V_um_s = (V / px_per_um);
-    otherwise
-        error('Unknown pivVelUnit: %s', pivVelUnit);
-end
-end
-
 function d = filter_image_dir(d)
 % Remove hidden files, macOS AppleDouble sidecars, and entries whose
 % extensions imread cannot handle. Keeps dir() struct shape.
