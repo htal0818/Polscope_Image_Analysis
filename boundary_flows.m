@@ -585,30 +585,12 @@ if makeQuiverOverlays
         BW_frame = poly2mask(poly(:,1), poly(:,2), H, W);
         BW_frame = imfill(BW_frame, 'holes');
 
-        xq = zeros(nQuiver, 1);
-        yq = zeros(nQuiver, 1);
-        uq = zeros(nQuiver, 1);
-        vq = zeros(nQuiver, 1);
-
-        % Get max velocity for normalization (makes arrows visible)
-        vmax_frame = max(abs(vtheta), [], 'omitnan');
-        if isnan(vmax_frame) || vmax_frame == 0
-            vmax_frame = 1;
-        end
-
-        % Arrow length in pixels (adjust quiverScale to change)
-        arrowLengthPx = 40 * quiverScale;
         per_frame = bwperim(BW_frame);
         D_frame = bwdist(per_frame);
 
         % Cortical band: pixels inside BW, between bandOuterPx and bandInnerPx from edge
         cortical_band = BW_frame & (D_frame >= bandOuterPx) & (D_frame <= bandInnerPx);
 
-            if isnan(vtheta_k), continue; end
-
-            % Position on boundary
-            R_mean = mean(RADIUS_OF_CURVATURE(fr, :), 'omitnan');
-            if isnan(R_mean), R_mean = 100; end
         % Create velocity image: assign velocity to each pixel based on its angle
         velocity_image = nan(H, W);
         [yy, xx] = find(cortical_band);
@@ -647,22 +629,7 @@ if makeQuiverOverlays
             velocity_rgb(:,:,c) = channel;
         end
 
-            % Scale arrow by velocity (normalized so max velocity = arrowLengthPx)
-            arrow_scale = arrowLengthPx * (vtheta_k / vmax_frame);
-
-            uq(k) = arrow_scale * tx;
-            vq(k) = arrow_scale * ty;
-        end
-
-        % Remove NaN entries
-        valid = ~isnan(uq) & ~isnan(vq);
-        xq = xq(valid); yq = yq(valid);
-        uq = uq(valid); vq = vq(valid);
-
-        % Plot quiver (no autoscale, we already scaled)
-        quiver(xq, yq, uq, vq, 0, 'Color', [0 1 0], 'LineWidth', 1.5, 'MaxHeadSize', 0.5);
-
-        title(sprintf('Frame %d: Tangential Flow Vectors (t=%.2f min)', fr, time_min(fr)), ...
+        title(sprintf('Frame %d: Tangential Flow Heatmap (t=%.2f min)', fr, time_min(fr)), ...
             'FontSize', 12, 'Color', 'w');
         % Overlay with transparency (only where cortical band exists)
         h_overlay = image(velocity_rgb);
