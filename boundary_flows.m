@@ -38,6 +38,16 @@ if useFourStates
     d2 = dir(s2); d3 = dir(s3); d4 = dir(s4);
 end
 
+% --- Drop hidden / macOS AppleDouble / non-image files from the listings ---
+% Fixes "Unable to determine the file format" from imread when a folder
+% contains e.g. .DS_Store or ._StateN_* sidecars, which dir() otherwise picks up.
+d1 = filter_image_dir(d1);
+if useFourStates
+    d2 = filter_image_dir(d2);
+    d3 = filter_image_dir(d3);
+    d4 = filter_image_dir(d4);
+end
+
 % --- PIVlab data: read from workspace (run PIVlab first) ---
 % Expects: u_original, v_original, x, y in workspace
 
@@ -1211,6 +1221,43 @@ switch lower(strtrim(pivVelUnit))
     otherwise
         error('Unknown pivVelUnit: %s', pivVelUnit);
 end
+end
+
+function [U_um_s, V_um_s] = convertVelToUmPerSec(U, V, pivVelUnit, px_per_um, dt_sec)
+% Convert PIV velocities to um/s (micrometers per second).
+% Sibling of convertVelToNmPerSec; used by compute_vorticity_from_PIV.
+switch lower(strtrim(pivVelUnit))
+    case 'px_per_frame'
+        U_um_s = (U / px_per_um) / dt_sec;
+        V_um_s = (V / px_per_um) / dt_sec;
+    case 'px_per_sec'
+        U_um_s = (U / px_per_um);
+        V_um_s = (V / px_per_um);
+    otherwise
+        error('Unknown pivVelUnit: %s', pivVelUnit);
+end
+end
+
+function d = filter_image_dir(d)
+% Remove hidden files, macOS AppleDouble sidecars, and entries whose
+% extensions imread cannot handle. Keeps dir() struct shape.
+if isempty(d); return; end
+keep = true(numel(d), 1);
+validExt = {'.tif','.tiff','.png','.jpg','.jpeg','.bmp','.gif','.tif_','.ome','.dcm','.nef','.cr2'};
+for i = 1:numel(d)
+    name = d(i).name;
+    if isempty(name) || name(1) == '.'                  % hidden / AppleDouble
+        keep(i) = false; continue;
+    end
+    if d(i).isdir                                       % subdirectory
+        keep(i) = false; continue;
+    end
+    [~,~,ext] = fileparts(name);
+    if ~any(strcmpi(ext, validExt))
+        keep(i) = false;
+    end
+end
+d = d(keep);
 end
 
 function [Xc, Yc, Uc, Vc] = pickPIVFields(S)
