@@ -171,14 +171,31 @@ visImageSeq = cell(nFrames,1);    % Store normalized images (for overlays)
 for fr = 1:nFrames
 
     %% ----- Load PolScope intensity image used for boundary -----
-    a1 = double(imread(fullfile(d1(fr).folder, d1(fr).name)));
-    if useFourStates
-        a2 = double(imread(fullfile(d2(fr).folder, d2(fr).name)));
-        a3 = double(imread(fullfile(d3(fr).folder, d3(fr).name)));
-        a4 = double(imread(fullfile(d4(fr).folder, d4(fr).name)));
-        Iraw = a1 + a2 + a3 + a4;
-    else
-        Iraw = a1;
+    try
+        a1 = double(imread(fullfile(d1(fr).folder, d1(fr).name)));
+        if useFourStates
+            a2 = double(imread(fullfile(d2(fr).folder, d2(fr).name)));
+            a3 = double(imread(fullfile(d3(fr).folder, d3(fr).name)));
+            a4 = double(imread(fullfile(d4(fr).folder, d4(fr).name)));
+            Iraw = a1 + a2 + a3 + a4;
+        else
+            Iraw = a1;
+        end
+    catch ME
+        % Report which file broke and skip this frame cleanly.
+        badList = {fullfile(d1(fr).folder, d1(fr).name)};
+        if useFourStates
+            badList = [badList, ...
+                {fullfile(d2(fr).folder, d2(fr).name), ...
+                 fullfile(d3(fr).folder, d3(fr).name), ...
+                 fullfile(d4(fr).folder, d4(fr).name)}];
+        end
+        fprintf(2, 'Frame %d: imread failed (%s). Candidate files:\n', fr, ME.message);
+        for kk = 1:numel(badList)
+            fprintf(2, '    %s\n', badList{kk});
+        end
+        fprintf(2, '  -> skipping frame %d.\n', fr);
+        continue;
     end
 
     if doCrop
@@ -1224,17 +1241,21 @@ end
 end
 
 function d = filter_image_dir(d)
-% Remove hidden files, macOS AppleDouble sidecars, and entries whose
-% extensions imread cannot handle. Keeps dir() struct shape.
+% Remove hidden files, macOS AppleDouble sidecars, subdirectories,
+% zero-byte stubs, and entries whose extensions imread cannot handle.
+% Keeps dir() struct shape.
 if isempty(d); return; end
 keep = true(numel(d), 1);
-validExt = {'.tif','.tiff','.png','.jpg','.jpeg','.bmp','.gif','.tif_','.ome','.dcm','.nef','.cr2'};
+validExt = {'.tif','.tiff','.png','.jpg','.jpeg','.bmp','.gif','.ome','.dcm','.nef','.cr2'};
 for i = 1:numel(d)
     name = d(i).name;
     if isempty(name) || name(1) == '.'                  % hidden / AppleDouble
         keep(i) = false; continue;
     end
     if d(i).isdir                                       % subdirectory
+        keep(i) = false; continue;
+    end
+    if isfield(d, 'bytes') && d(i).bytes == 0           % zero-byte stub
         keep(i) = false; continue;
     end
     [~,~,ext] = fileparts(name);
