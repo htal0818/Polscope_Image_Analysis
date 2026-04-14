@@ -71,15 +71,23 @@ bit_depth = 16;               % image bit depth (16-bit = 0..65535)
 sigmaBlur   = 20;      % Gaussian blur sigma (px) for segmentation mask
 closeRadius = 25;      % morphological close disk radius (px)
 minArea     = 5000;    % minimum object area (px^2) to reject debris
-boundaryInset_px = 10; % shift boundary inward (px) onto cortical ring center
+peakSearchDepth_um = 5;  % max depth (um) along inward normal to search for cortical peak
 
 % --- Threshold mode ---
 % 'otsu'       : automatic Otsu threshold on blurred image (default)
 % 'fixed'      : fixed intensity threshold on raw image
 % 'percentile' : threshold at a percentile of raw image intensity
+% 'adaptive'   : locally adaptive threshold (handles uneven illumination)
+% 'edge'       : edge detection (Canny/Sobel) + morphological fill
+% 'gradient'   : gradient magnitude threshold + morphological fill
 thresholdMode       = 'otsu';
 fixedThreshold      = 500;     % raw pixel value for 'fixed' mode
 percentileThreshold = 30;      % percentile for 'percentile' mode (pixels ABOVE this)
+adaptSensitivity    = 0.5;     % adaptthresh sensitivity [0..1]; higher = more foreground
+adaptNeighborhood   = 201;     % adaptthresh neighborhood size (odd integer, px)
+edgeMethod          = 'Canny'; % edge() method: 'Canny', 'Sobel', 'Prewitt', 'log'
+edgeDilateRadius    = 3;       % dilation radius (px) to close edge gaps before fill
+gradientPercentile  = 80;      % gradient magnitude percentile for 'gradient' mode
 
 % --- Radial profile parameters ---
 radialStep_um  = 0.5;  % radial sampling step (microns)
@@ -308,30 +316,65 @@ for fr = 1:nFrames
         % --- FULL MASK RECALCULATION ---
         I_blur = imgaussfilt(Iseg, sigmaBlur);
 
-        if segFromMask
-            % Mask source (e.g. 4-state sum): oocyte is DARK on lighter background → invert
-            I_norm = I_blur / max(I_blur(:));
-            Totsu = graythresh(I_norm);
-            BW = I_norm < Totsu;   % inverted: oocyte is below threshold
-        else
-            % Retardance: oocyte cortex is BRIGHT → standard threshold
-            switch thresholdMode
-                case 'otsu'
-                    I_norm = I_blur / max(I_blur(:));
-                    Totsu = graythresh(I_norm);
+        I_norm = I_blur / max(I_blur(:));
+
+        switch thresholdMode
+            case 'otsu'
+                Totsu = graythresh(I_norm);
+                if segFromMask
+                    BW = I_norm < Totsu;
+                else
                     BW = I_norm > Totsu;
+                end
 
-                case 'fixed'
+            case 'fixed'
+                if segFromMask
+                    BW = I_blur < fixedThreshold;
+                else
                     BW = I_blur > fixedThreshold;
+                end
 
-                case 'percentile'
-                    pVal = prctile(I_blur(:), percentileThreshold);
+            case 'percentile'
+                pVal = prctile(I_blur(:), percentileThreshold);
+                if segFromMask
+                    BW = I_blur < pVal;
+                else
                     BW = I_blur > pVal;
+                end
 
-                otherwise
-                    error('Unknown thresholdMode: %s', thresholdMode);
-            end
+            case 'adaptive'
+                nhd = min(adaptNeighborhood, 2*floor(min(size(I_norm))/4)+1);
+                T = adaptthresh(I_norm, adaptSensitivity, ...
+                        'NeighborhoodSize', nhd);
+                BW = imbinarize(I_norm, T);
+                if segFromMask
+                    BW = ~BW;
+                end
+
+            case 'edge'
+                edges = edge(I_norm, edgeMethod);
+                se_edge = strel('disk', edgeDilateRadius);
+                edges = imdilate(edges, se_edge);
+                BW = imfill(edges, 'holes');
+                if segFromMask && sum(BW(:)) > 0.5 * numel(BW)
+                    BW = ~BW;
+                end
+
+            case 'gradient'
+                [Gmag, ~] = imgradient(I_blur);
+                thrG = prctile(Gmag(:), gradientPercentile);
+                BW_edges = Gmag >= thrG;
+                se_edge = strel('disk', edgeDilateRadius);
+                BW_edges = imdilate(BW_edges, se_edge);
+                BW = imfill(BW_edges, 'holes');
+                if segFromMask && sum(BW(:)) > 0.5 * numel(BW)
+                    BW = ~BW;
+                end
+
+            otherwise
+                error('Unknown thresholdMode: %s', thresholdMode);
         end
+
 
         % Aggressive morphological cleanup
         se = strel('disk', closeRadius);
@@ -397,48 +440,8 @@ for fr = 1:nFrames
     xb_orig = xb;
     yb_orig = yb;
 
-    % Shrink boundary inward onto cortical ring center (for kymograph only)
-    dx = xb - xc;  dy = yb - yc;
-    dist = sqrt(dx.^2 + dy.^2);
-    shrink = max(dist - boundaryInset_px, 1) ./ dist;
-    xb = xc + dx .* shrink;
-    yb = yc + dy .* shrink;
-
-    %% ----- Retardance along the boundary (kymograph row) -----
-    % Angle of each boundary point relative to center
-    th = atan2(yb - yc, xb - xc);
-    th(th < 0) = th(th < 0) + 2*pi;
-
-    % Interpolate retardance (nm) at boundary pixel locations
+    % Interpolate retardance (nm) — used by all profiling below
     F = griddedInterpolant({1:H, 1:W}, Iret, 'linear', 'nearest');
-    ib = F(yb, xb);  % retardance in nm at each boundary point
-
-    % Bin by angle
-    bin = discretize(th, thetaBinEdges);
-    valid = ~isnan(bin);
-
-    row = nan(1, nThetaBins);
-    if any(valid)
-        sumBins = accumarray(bin(valid), ib(valid), [nThetaBins 1], @nanmean, NaN);
-        row = sumBins';
-    end
-
-    % Fill missing bins via circular interpolation
-    bad = isnan(row);
-    if any(bad) && sum(~bad) >= 2
-        goodIdx = find(~bad);
-        xw = [goodIdx - nThetaBins, goodIdx, goodIdx + nThetaBins];
-        vw = [row(goodIdx), row(goodIdx), row(goodIdx)];
-        row(bad) = interp1(xw, vw, find(bad), 'linear', 'extrap');
-    end
-
-    kymo(fr,:) = row;
-
-    %% ----- Contour retardance statistics (nm) -----
-    contourMean(fr) = mean(ib, 'omitnan');
-    contourStd(fr)  = std(ib, 'omitnan');
-    contourMax(fr)  = max(ib);
-    contourMin(fr)  = min(ib);
 
     %% ----- Angle-averaged radial profile (center outward, in nm) -----
     sampleAngles = linspace(0, 2*pi, nAngleSamples+1);
@@ -510,9 +513,13 @@ for fr = 1:nFrames
     nx(dot_check < 0) = -nx(dot_check < 0);
     ny(dot_check < 0) = -ny(dot_check < 0);
 
-    %% ----- Normal-based outside-in radial profiles -----
+    %% ----- Normal-based outside-in radial profiles + peak retardance -----
     normal_sum   = zeros(1, nDepth);
     normal_count = zeros(1, nDepth);
+
+    peakSearchIdx = find(depthAxis_um <= peakSearchDepth_um);
+    peakRetardance = nan(1, nBoundaryPts);
+    peakDepth_um   = nan(1, nBoundaryPts);
 
     for bi = 1:nBoundaryPts
         % Sample along inward normal from this boundary point
@@ -524,10 +531,45 @@ for fr = 1:nFrames
             vals = F(ys_n(inBounds), xs_n(inBounds));
             normal_sum(inBounds)   = normal_sum(inBounds)   + vals(:)';
             normal_count(inBounds) = normal_count(inBounds) + 1;
+
+            % Find peak retardance within search window
+            searchIdx = intersect(peakSearchIdx, find(inBounds));
+            if ~isempty(searchIdx)
+                searchVals = F(ys_n(searchIdx), xs_n(searchIdx));
+                [peakRetardance(bi), pidx] = max(searchVals);
+                peakDepth_um(bi) = depthAxis_um(searchIdx(pidx));
+            end
         end
     end
     validN = normal_count > 0;
     normalProfiles(fr, validN) = normal_sum(validN) ./ normal_count(validN);
+
+    %% ----- Kymograph & contour stats from peak retardance -----
+    th = atan2(polyY - yc, polyX - xc);
+    th(th < 0) = th(th < 0) + 2*pi;
+
+    bin = discretize(th, thetaBinEdges);
+    valid = ~isnan(bin) & ~isnan(peakRetardance);
+
+    row = nan(1, nThetaBins);
+    if any(valid)
+        row = accumarray(bin(valid), peakRetardance(valid)', [nThetaBins 1], @nanmean, NaN)';
+    end
+
+    % Fill missing bins via circular interpolation
+    bad = isnan(row);
+    if any(bad) && sum(~bad) >= 2
+        goodIdx = find(~bad);
+        xw = [goodIdx - nThetaBins, goodIdx, goodIdx + nThetaBins];
+        vw = [row(goodIdx), row(goodIdx), row(goodIdx)];
+        row(bad) = interp1(xw, vw, find(bad), 'linear', 'extrap');
+    end
+
+    kymo(fr,:) = row;
+    contourMean(fr) = mean(peakRetardance, 'omitnan');
+    contourStd(fr)  = std(peakRetardance, 0, 'omitnan');
+    contourMax(fr)  = max(peakRetardance);
+    contourMin(fr)  = min(peakRetardance);
 
     %% ----- Distance transform outside-in radial profiles -----
     % Reuse per and D_full from normal computation above
@@ -769,6 +811,35 @@ exportgraphics(fig9, fullfile(outDir, 'comparison_normal_vs_dist.png'), 'Resolut
 savefig(fig9, fullfile(outDir, 'comparison_normal_vs_dist.fig'));
 close(fig9);
 
+% --- Plot 10: Peak retardance of radial/normal profiles over time ---
+[peakNormal_nm, iN]   = max(normalProfiles, [], 2, 'omitnan');
+[peakRadial_nm, iR]   = max(radialProfiles_trim, [], 2, 'omitnan');
+peakNormalDepth_um    = depthAxis_um(iN);
+peakRadialRadius_um   = radialAxis_um_trim(iR);
+
+fig10 = figure('Position', [100 100 900 600]);
+subplot(2,1,1);
+plot(time_min, peakNormal_nm, 'b-', 'LineWidth', 1.5, 'DisplayName', 'Normal profile peak'); hold on;
+plot(time_min, peakRadial_nm, 'r-', 'LineWidth', 1.5, 'DisplayName', 'Radial profile peak');
+xlabel('Time (min)', 'FontSize', 12);
+ylabel('Peak retardance (nm)', 'FontSize', 12);
+title('Peak Retardance of Angle-Averaged Profiles Over Time', 'FontSize', 13);
+grid on;
+legend('show', 'Location', 'best', 'FontSize', 10);
+
+subplot(2,1,2);
+plot(time_min, peakNormalDepth_um, 'b-', 'LineWidth', 1.5, 'DisplayName', 'Normal peak depth (from cortex)'); hold on;
+plot(time_min, peakRadialRadius_um, 'r-', 'LineWidth', 1.5, 'DisplayName', 'Radial peak radius (from center)');
+xlabel('Time (min)', 'FontSize', 12);
+ylabel('Location (\mum)', 'FontSize', 12);
+title('Location of Profile Peak Over Time', 'FontSize', 13);
+grid on;
+legend('show', 'Location', 'best', 'FontSize', 10);
+
+exportgraphics(fig10, fullfile(outDir, 'profile_peak_vs_time.png'), 'Resolution', 200);
+savefig(fig10, fullfile(outDir, 'profile_peak_vs_time.fig'));
+close(fig10);
+
 %% ========================== SAVE DATA =====================================
 results = struct();
 results.kymo                  = kymo;
@@ -783,6 +854,10 @@ results.contourMean_nm        = contourMean;
 results.contourStd_nm         = contourStd;
 results.contourMax_nm         = contourMax;
 results.contourMin_nm         = contourMin;
+results.peakNormal_nm         = peakNormal_nm;
+results.peakRadial_nm         = peakRadial_nm;
+results.peakNormalDepth_um    = peakNormalDepth_um;
+results.peakRadialRadius_um   = peakRadialRadius_um;
 results.centroidXY            = centroidXY;
 results.meanRadius_px         = meanRadius_px;
 results.meanRadius_um         = meanRadius_px * um_per_px;
@@ -797,6 +872,11 @@ results.nThetaBins            = nThetaBins;
 results.nAngleSamples         = nAngleSamples;
 results.inputMode             = inputMode;
 results.thresholdMode         = thresholdMode;
+results.adaptSensitivity      = adaptSensitivity;
+results.adaptNeighborhood     = adaptNeighborhood;
+results.edgeMethod            = edgeMethod;
+results.edgeDilateRadius      = edgeDilateRadius;
+results.gradientPercentile    = gradientPercentile;
 results.smoothWindow          = smoothW;
 results.nBoundaryPts          = nBoundaryPts;
 results.maxDepth_um           = maxDepth_um;
@@ -804,7 +884,7 @@ results.depthStep_um          = depthStep_um;
 results.sigmaBlur             = sigmaBlur;
 results.closeRadius           = closeRadius;
 results.minArea               = minArea;
-results.boundaryInset_px      = boundaryInset_px;
+results.peakSearchDepth_um    = peakSearchDepth_um;
 
 save(fullfile(outDir, 'contour_retardance_results.mat'), '-struct', 'results');
 fprintf('Saved results to: %s\n', fullfile(outDir, 'contour_retardance_results.mat'));
