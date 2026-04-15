@@ -1,10 +1,21 @@
 %% wave_axis_pipeline.m
-% Post-processing driver that reads tangential_kymo_results.mat (produced by
-% boundary_flows.m), computes per-frame wave propagation axes from both the
-% boundary shape and the tangential velocity field, prompts the user to
-% click the nucleus, compares the axes to the centroid->nucleus direction,
-% detects discrete wave events, and saves the enriched results back to the
-% same .mat file.
+% Post-processing driver that reads results from either
+% boundary_flows.m (tangential_kymo_results.mat) or
+% boundary_flows_linear_interpolant_approach.m (tangential_linear_interp_results.mat),
+% computes per-frame wave propagation axes from the boundary shape and
+% the tangential velocity field, prompts the user to click the nucleus,
+% compares the axes to the centroid->nucleus direction, detects discrete
+% wave events, and saves the enriched results back to the same .mat file.
+%
+% Data preferences (auto-detected):
+%   * Velocity axis: uses Vtheta_raw/Theta_raw (~500 native boundary
+%     points per frame) when present, else falls back to the 101-bin
+%     Vtheta_kymo. The raw form gives a strictly more accurate k=1
+%     Fourier phase and is standard output from the linear-interpolant
+%     pipeline.
+%   * Shape axis: uses visPolySeq when present; otherwise the script
+%     runs in velocity-only mode (phi_shape = NaN) and event detection /
+%     circular stats are driven by the velocity amplitude instead.
 %
 % USAGE:
 %   1. Edit resultsDir below (or set resultsDir in the base workspace).
@@ -100,6 +111,23 @@ else
 end
 nFrames = size(Vtheta_kymo, 1);
 
+% Raw per-boundary-point arrays (linear-interpolant pipeline) give a
+% strictly better velocity-axis estimate than the 101-bin kymograph,
+% because the Fourier phase is computed on ~500 native samples per
+% frame rather than bin-averages. Prefer them when present.
+haveRawVel = isfield(S, 'Vtheta_raw') && isfield(S, 'Theta_raw') && ...
+             iscell(S.Vtheta_raw) && iscell(S.Theta_raw);
+if haveRawVel
+    fprintf('Velocity axis: using Vtheta_raw / Theta_raw (native ~500 pts/frame).\n');
+else
+    fprintf('Velocity axis: using Vtheta_kymo (101 bins/frame).\n');
+end
+if haveShape
+    fprintf('Shape axis:    using visPolySeq.\n');
+else
+    fprintf('Shape axis:    DISABLED (visPolySeq missing).\n');
+end
+
 %% -------- NUCLEUS PICKER --------
 % Load existing image sequence if stored; otherwise fall back to the
 % centroid-only preview (pick_nucleus handles headless fallback).
@@ -183,7 +211,17 @@ for fr = 1:nFrames
     end
 
     % --- velocity axis ---
-    [p2, a2] = wave_axis_from_velocity(Vtheta_kymo(fr, :), thetaCenters);
+    if haveRawVel
+        vr = S.Vtheta_raw{fr};
+        tr = S.Theta_raw{fr};
+        if ~isempty(vr) && ~isempty(tr)
+            [p2, a2] = wave_axis_from_velocity(vr, tr);
+        else
+            [p2, a2] = wave_axis_from_velocity(Vtheta_kymo(fr, :), thetaCenters);
+        end
+    else
+        [p2, a2] = wave_axis_from_velocity(Vtheta_kymo(fr, :), thetaCenters);
+    end
     phi_vel(fr) = p2;
     amp_vel(fr) = a2;
 
