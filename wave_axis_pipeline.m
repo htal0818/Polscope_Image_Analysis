@@ -31,15 +31,37 @@
 % ========================================================================
 
 %% -------- CONFIG --------
-if ~exist('resultsDir','var') || isempty(resultsDir)
-    % EDIT THIS to point to the output folder from boundary_flows.m that
-    % contains tangential_kymo_results.mat (e.g. 'demo_output/run1').
-    resultsDir = fullfile(pwd, 'demo_output');
+% Two ways to point this script at the data:
+%   1) Set `resultsFile` in the workspace to an absolute .mat path.
+%   2) Set `resultsDir` and the script will auto-detect either
+%      'tangential_kymo_results.mat' (from boundary_flows.m) or
+%      'tangential_linear_interp_results.mat' (from
+%      boundary_flows_linear_interpolant_approach.m).
+if ~exist('resultsFile','var') || isempty(resultsFile)
+    if ~exist('resultsDir','var') || isempty(resultsDir)
+        % EDIT THIS to point to the output folder from either boundary_flows script.
+        resultsDir = fullfile(pwd, 'demo_output');
+    end
+    candidates = { ...
+        fullfile(resultsDir, 'tangential_kymo_results.mat'), ...
+        fullfile(resultsDir, 'tangential_linear_interp_results.mat')};
+    resultsFile = '';
+    for ii = 1:numel(candidates)
+        if exist(candidates{ii}, 'file') == 2
+            resultsFile = candidates{ii}; break;
+        end
+    end
+    assert(~isempty(resultsFile), ...
+        ['wave_axis_pipeline: no results .mat found under %s. ' ...
+         'Expected one of:\n  %s\n  %s\n' ...
+         'Set `resultsFile` or `resultsDir` in the workspace.'], ...
+        resultsDir, candidates{1}, candidates{2});
+else
+    assert(exist(resultsFile, 'file') == 2, ...
+        'wave_axis_pipeline: resultsFile does not exist: %s', resultsFile);
 end
-
-resultsFile = fullfile(resultsDir, 'tangential_kymo_results.mat');
-assert(exist(resultsFile, 'file') == 2, ...
-    'wave_axis_pipeline: cannot find %s (adjust resultsDir)', resultsFile);
+resultsDir = fileparts(resultsFile);
+fprintf('Using results file: %s\n', resultsFile);
 
 outDir = fullfile(resultsDir, 'wave_axis');
 if ~exist(outDir, 'dir'); mkdir(outDir); end

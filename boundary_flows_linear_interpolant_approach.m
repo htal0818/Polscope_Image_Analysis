@@ -35,6 +35,16 @@ if useFourStates
     d2 = dir(s2); d3 = dir(s3); d4 = dir(s4);
 end
 
+% --- Drop hidden / macOS AppleDouble / non-image files from the listings ---
+% Fixes "Unable to determine the file format" from imread when a folder
+% contains e.g. .DS_Store or ._StateN_* sidecars, which dir() otherwise picks up.
+d1 = filter_image_dir(d1);
+if useFourStates
+    d2 = filter_image_dir(d2);
+    d3 = filter_image_dir(d3);
+    d4 = filter_image_dir(d4);
+end
+
 % --- PIVlab output .mat file ---
 % --- PIVlab data: read from workspace (run PIVlab first) ---
 % Expects: u_original, v_original, x, y in workspace
@@ -153,14 +163,30 @@ visImageSeq = cell(nFrames,1);
 for fr = 1:nFrames
 
     %% ----- Load PolScope intensity image -----
-    a1 = double(imread(fullfile(d1(fr).folder, d1(fr).name)));
-    if useFourStates
-        a2 = double(imread(fullfile(d2(fr).folder, d2(fr).name)));
-        a3 = double(imread(fullfile(d3(fr).folder, d3(fr).name)));
-        a4 = double(imread(fullfile(d4(fr).folder, d4(fr).name)));
-        Iraw = a1 + a2 + a3 + a4;
-    else
-        Iraw = a1;
+    try
+        a1 = double(imread(fullfile(d1(fr).folder, d1(fr).name)));
+        if useFourStates
+            a2 = double(imread(fullfile(d2(fr).folder, d2(fr).name)));
+            a3 = double(imread(fullfile(d3(fr).folder, d3(fr).name)));
+            a4 = double(imread(fullfile(d4(fr).folder, d4(fr).name)));
+            Iraw = a1 + a2 + a3 + a4;
+        else
+            Iraw = a1;
+        end
+    catch ME
+        badList = {fullfile(d1(fr).folder, d1(fr).name)};
+        if useFourStates
+            badList = [badList, ...
+                {fullfile(d2(fr).folder, d2(fr).name), ...
+                 fullfile(d3(fr).folder, d3(fr).name), ...
+                 fullfile(d4(fr).folder, d4(fr).name)}];
+        end
+        fprintf(2, 'Frame %d: imread failed (%s). Candidate files:\n', fr, ME.message);
+        for kk = 1:numel(badList)
+            fprintf(2, '    %s\n', badList{kk});
+        end
+        fprintf(2, '  -> skipping frame %d.\n', fr);
+        continue;
     end
 
     if doCrop
@@ -693,7 +719,8 @@ save(fullfile(outDir,'tangential_linear_interp_results.mat'), ...
      'Vtheta_kymo', 'Npts_kymo', 'thetaCenters', 'thetaBinEdges', 'time_min', ...
      'centroidXY', 'areaMask', 'qcFlag', 'RADIUS_OF_CURVATURE', ...
      'Vorticity_kymo', 'Vorticity_field', 'MeanVorticity', ...
-     'px_per_um', 'dt_sec', 'normalOffsetPx', 'pivMatFile', 'base_dir');
+     'visPolySeq', ...
+     'px_per_um', 'dt_sec', 'normalOffsetPx', 'base_dir');
 
 fprintf('Saved outputs to: %s\n', outDir);
 fprintf('\nLINEAR INTERPOLANT APPROACH outputs:\n');
@@ -1057,6 +1084,33 @@ end
 
 function v = clamp(v, lo, hi)
 v = max(lo, min(hi, v));
+end
+
+
+function d = filter_image_dir(d)
+% Remove hidden files, macOS AppleDouble sidecars, subdirectories,
+% zero-byte stubs, and entries whose extensions imread cannot handle.
+% Keeps dir() struct shape.
+if isempty(d); return; end
+keep = true(numel(d), 1);
+validExt = {'.tif','.tiff','.png','.jpg','.jpeg','.bmp','.gif','.ome','.dcm','.nef','.cr2'};
+for i = 1:numel(d)
+    name = d(i).name;
+    if isempty(name) || name(1) == '.'                  % hidden / AppleDouble
+        keep(i) = false; continue;
+    end
+    if d(i).isdir                                       % subdirectory
+        keep(i) = false; continue;
+    end
+    if isfield(d, 'bytes') && d(i).bytes == 0           % zero-byte stub
+        keep(i) = false; continue;
+    end
+    [~,~,ext] = fileparts(name);
+    if ~any(strcmpi(ext, validExt))
+        keep(i) = false;
+    end
+end
+d = d(keep);
 end
 
 
