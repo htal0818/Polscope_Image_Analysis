@@ -38,6 +38,16 @@ if useFourStates
     d2 = dir(s2); d3 = dir(s3); d4 = dir(s4);
 end
 
+% --- Drop hidden / macOS AppleDouble / non-image files from the listings ---
+% Fixes "Unable to determine the file format" from imread when a folder
+% contains e.g. .DS_Store or ._StateN_* sidecars, which dir() otherwise picks up.
+d1 = filter_image_dir(d1);
+if useFourStates
+    d2 = filter_image_dir(d2);
+    d3 = filter_image_dir(d3);
+    d4 = filter_image_dir(d4);
+end
+
 % --- PIVlab data: read from workspace (run PIVlab first) ---
 % Expects: u_original, v_original, x, y in workspace
 
@@ -161,14 +171,31 @@ visImageSeq = cell(nFrames,1);    % Store normalized images (for overlays)
 for fr = 1:nFrames
 
     %% ----- Load PolScope intensity image used for boundary -----
-    a1 = double(imread(fullfile(d1(fr).folder, d1(fr).name)));
-    if useFourStates
-        a2 = double(imread(fullfile(d2(fr).folder, d2(fr).name)));
-        a3 = double(imread(fullfile(d3(fr).folder, d3(fr).name)));
-        a4 = double(imread(fullfile(d4(fr).folder, d4(fr).name)));
-        Iraw = a1 + a2 + a3 + a4;
-    else
-        Iraw = a1;
+    try
+        a1 = double(imread(fullfile(d1(fr).folder, d1(fr).name)));
+        if useFourStates
+            a2 = double(imread(fullfile(d2(fr).folder, d2(fr).name)));
+            a3 = double(imread(fullfile(d3(fr).folder, d3(fr).name)));
+            a4 = double(imread(fullfile(d4(fr).folder, d4(fr).name)));
+            Iraw = a1 + a2 + a3 + a4;
+        else
+            Iraw = a1;
+        end
+    catch ME
+        % Report which file broke and skip this frame cleanly.
+        badList = {fullfile(d1(fr).folder, d1(fr).name)};
+        if useFourStates
+            badList = [badList, ...
+                {fullfile(d2(fr).folder, d2(fr).name), ...
+                 fullfile(d3(fr).folder, d3(fr).name), ...
+                 fullfile(d4(fr).folder, d4(fr).name)}];
+        end
+        fprintf(2, 'Frame %d: imread failed (%s). Candidate files:\n', fr, ME.message);
+        for kk = 1:numel(badList)
+            fprintf(2, '    %s\n', badList{kk});
+        end
+        fprintf(2, '  -> skipping frame %d.\n', fr);
+        continue;
     end
 
     if doCrop
@@ -558,30 +585,12 @@ if makeQuiverOverlays
         BW_frame = poly2mask(poly(:,1), poly(:,2), H, W);
         BW_frame = imfill(BW_frame, 'holes');
 
-        xq = zeros(nQuiver, 1);
-        yq = zeros(nQuiver, 1);
-        uq = zeros(nQuiver, 1);
-        vq = zeros(nQuiver, 1);
-
-        % Get max velocity for normalization (makes arrows visible)
-        vmax_frame = max(abs(vtheta), [], 'omitnan');
-        if isnan(vmax_frame) || vmax_frame == 0
-            vmax_frame = 1;
-        end
-
-        % Arrow length in pixels (adjust quiverScale to change)
-        arrowLengthPx = 40 * quiverScale;
         per_frame = bwperim(BW_frame);
         D_frame = bwdist(per_frame);
 
         % Cortical band: pixels inside BW, between bandOuterPx and bandInnerPx from edge
         cortical_band = BW_frame & (D_frame >= bandOuterPx) & (D_frame <= bandInnerPx);
 
-            if isnan(vtheta_k), continue; end
-
-            % Position on boundary
-            R_mean = mean(RADIUS_OF_CURVATURE(fr, :), 'omitnan');
-            if isnan(R_mean), R_mean = 100; end
         % Create velocity image: assign velocity to each pixel based on its angle
         velocity_image = nan(H, W);
         [yy, xx] = find(cortical_band);
@@ -620,22 +629,7 @@ if makeQuiverOverlays
             velocity_rgb(:,:,c) = channel;
         end
 
-            % Scale arrow by velocity (normalized so max velocity = arrowLengthPx)
-            arrow_scale = arrowLengthPx * (vtheta_k / vmax_frame);
-
-            uq(k) = arrow_scale * tx;
-            vq(k) = arrow_scale * ty;
-        end
-
-        % Remove NaN entries
-        valid = ~isnan(uq) & ~isnan(vq);
-        xq = xq(valid); yq = yq(valid);
-        uq = uq(valid); vq = vq(valid);
-
-        % Plot quiver (no autoscale, we already scaled)
-        quiver(xq, yq, uq, vq, 0, 'Color', [0 1 0], 'LineWidth', 1.5, 'MaxHeadSize', 0.5);
-
-        title(sprintf('Frame %d: Tangential Flow Vectors (t=%.2f min)', fr, time_min(fr)), ...
+        title(sprintf('Frame %d: Tangential Flow Heatmap (t=%.2f min)', fr, time_min(fr)), ...
             'FontSize', 12, 'Color', 'w');
         % Overlay with transparency (only where cortical band exists)
         h_overlay = image(velocity_rgb);
@@ -950,7 +944,7 @@ save(fullfile(outDir,'tangential_kymo_results.mat'), ...
      'centroidXY','areaMask','qcFlag','RADIUS_OF_CURVATURE', ...
      'Vorticity_kymo','Vorticity_field','MeanVorticity', ...
      'visPolySeq', ...
-     'px_per_um','dt_sec','bandOuterPx','bandInnerPx','pivMatFile','base_dir');
+     'px_per_um','dt_sec','bandOuterPx','bandInnerPx','base_dir');
 
 fprintf('Saved outputs to: %s\n', outDir);
 fprintf('\nVorticity data included:\n');
@@ -1211,6 +1205,32 @@ switch lower(strtrim(pivVelUnit))
     otherwise
         error('Unknown pivVelUnit: %s', pivVelUnit);
 end
+end
+
+function d = filter_image_dir(d)
+% Remove hidden files, macOS AppleDouble sidecars, subdirectories,
+% zero-byte stubs, and entries whose extensions imread cannot handle.
+% Keeps dir() struct shape.
+if isempty(d); return; end
+keep = true(numel(d), 1);
+validExt = {'.tif','.tiff','.png','.jpg','.jpeg','.bmp','.gif','.ome','.dcm','.nef','.cr2'};
+for i = 1:numel(d)
+    name = d(i).name;
+    if isempty(name) || name(1) == '.'                  % hidden / AppleDouble
+        keep(i) = false; continue;
+    end
+    if d(i).isdir                                       % subdirectory
+        keep(i) = false; continue;
+    end
+    if isfield(d, 'bytes') && d(i).bytes == 0           % zero-byte stub
+        keep(i) = false; continue;
+    end
+    [~,~,ext] = fileparts(name);
+    if ~any(strcmpi(ext, validExt))
+        keep(i) = false;
+    end
+end
+d = d(keep);
 end
 
 function [Xc, Yc, Uc, Vc] = pickPIVFields(S)

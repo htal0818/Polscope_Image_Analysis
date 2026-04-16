@@ -127,6 +127,15 @@ if needsRecalc || ~useCaching
     BW = imfill(BW, 'holes');
     BW = bwareaopen(BW, minArea);
 
+    % Reject components touching the image border (vignette / dark frame
+    % corners / acquisition-mask artifacts). The oocyte is centrally
+    % located, so border-touching blobs are never the object of interest.
+    % Guarded: if clearing the border kills everything, keep the original.
+    BW_cleared = imclearborder(BW);
+    if any(BW_cleared(:))
+        BW = BW_cleared;
+    end
+
     % Fallback: gradient-based if threshold fails
     if ~any(BW(:))
         [Gmag, ~] = imgradient(Iseg);

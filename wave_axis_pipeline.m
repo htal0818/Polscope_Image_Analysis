@@ -1,10 +1,21 @@
 %% wave_axis_pipeline.m
-% Post-processing driver that reads tangential_kymo_results.mat (produced by
-% boundary_flows.m), computes per-frame wave propagation axes from both the
-% boundary shape and the tangential velocity field, prompts the user to
-% click the nucleus, compares the axes to the centroid->nucleus direction,
-% detects discrete wave events, and saves the enriched results back to the
-% same .mat file.
+% Post-processing driver that reads results from either
+% boundary_flows.m (tangential_kymo_results.mat) or
+% boundary_flows_linear_interpolant_approach.m (tangential_linear_interp_results.mat),
+% computes per-frame wave propagation axes from the boundary shape and
+% the tangential velocity field, prompts the user to click the nucleus,
+% compares the axes to the centroid->nucleus direction, detects discrete
+% wave events, and saves the enriched results back to the same .mat file.
+%
+% Data preferences (auto-detected):
+%   * Velocity axis: uses Vtheta_raw/Theta_raw (~500 native boundary
+%     points per frame) when present, else falls back to the 101-bin
+%     Vtheta_kymo. The raw form gives a strictly more accurate k=1
+%     Fourier phase and is standard output from the linear-interpolant
+%     pipeline.
+%   * Shape axis: uses visPolySeq when present; otherwise the script
+%     runs in velocity-only mode (phi_shape = NaN) and event detection /
+%     circular stats are driven by the velocity amplitude instead.
 %
 % USAGE:
 %   1. Edit resultsDir below (or set resultsDir in the base workspace).
@@ -31,15 +42,37 @@
 % ========================================================================
 
 %% -------- CONFIG --------
-if ~exist('resultsDir','var') || isempty(resultsDir)
-    % EDIT THIS to point to the output folder from boundary_flows.m that
-    % contains tangential_kymo_results.mat (e.g. 'demo_output/run1').
-    resultsDir = fullfile(pwd, 'demo_output');
+% Two ways to point this script at the data:
+%   1) Set `resultsFile` in the workspace to an absolute .mat path.
+%   2) Set `resultsDir` and the script will auto-detect either
+%      'tangential_kymo_results.mat' (from boundary_flows.m) or
+%      'tangential_linear_interp_results.mat' (from
+%      boundary_flows_linear_interpolant_approach.m).
+if ~exist('resultsFile','var') || isempty(resultsFile)
+    if ~exist('resultsDir','var') || isempty(resultsDir)
+        % EDIT THIS to point to the output folder from either boundary_flows script.
+        resultsDir = fullfile(pwd, 'demo_output');
+    end
+    candidates = { ...
+        fullfile(resultsDir, 'tangential_kymo_results.mat'), ...
+        fullfile(resultsDir, 'tangential_linear_interp_results.mat')};
+    resultsFile = '';
+    for ii = 1:numel(candidates)
+        if exist(candidates{ii}, 'file') == 2
+            resultsFile = candidates{ii}; break;
+        end
+    end
+    assert(~isempty(resultsFile), ...
+        ['wave_axis_pipeline: no results .mat found under %s. ' ...
+         'Expected one of:\n  %s\n  %s\n' ...
+         'Set `resultsFile` or `resultsDir` in the workspace.'], ...
+        resultsDir, candidates{1}, candidates{2});
+else
+    assert(exist(resultsFile, 'file') == 2, ...
+        'wave_axis_pipeline: resultsFile does not exist: %s', resultsFile);
 end
-
-resultsFile = fullfile(resultsDir, 'tangential_kymo_results.mat');
-assert(exist(resultsFile, 'file') == 2, ...
-    'wave_axis_pipeline: cannot find %s (adjust resultsDir)', resultsFile);
+resultsDir = fileparts(resultsFile);
+fprintf('Using results file: %s\n', resultsFile);
 
 outDir = fullfile(resultsDir, 'wave_axis');
 if ~exist(outDir, 'dir'); mkdir(outDir); end
@@ -49,11 +82,21 @@ fprintf('Loading %s ...\n', resultsFile);
 S = load(resultsFile);
 
 % --- Sanity check required fields ---
-required = {'Vtheta_kymo','thetaCenters','centroidXY','time_min','qcFlag','visPolySeq'};
+required = {'Vtheta_kymo','thetaCenters','centroidXY','time_min','qcFlag'};
 for f = required
     assert(isfield(S, f{1}), ...
-        'wave_axis_pipeline: field "%s" missing from %s. Re-run boundary_flows.m with updated save block.', ...
+        'wave_axis_pipeline: field "%s" missing from %s. Re-run the boundary_flows script.', ...
         f{1}, resultsFile);
+end
+% visPolySeq is optional: if missing, we skip the shape-based wave axis
+% and fall back to the velocity-based axis only. Re-run the updated
+% boundary_flows_* script to get the full set of metrics.
+haveShape = isfield(S, 'visPolySeq');
+if ~haveShape
+    warning(['wave_axis_pipeline: "visPolySeq" missing from results. ' ...
+             'Running in VELOCITY-ONLY mode; shape-axis (phi_shape, ' ...
+             'amp_shape, kStar_shape) will be NaN. Re-run the boundary_flows ' ...
+             'script to get the full analysis.']);
 end
 
 Vtheta_kymo = S.Vtheta_kymo;
@@ -61,8 +104,29 @@ thetaCenters = S.thetaCenters;
 centroidXY = S.centroidXY;
 time_min = S.time_min;
 qcFlag = S.qcFlag(:);
-visPolySeq = S.visPolySeq;
+if haveShape
+    visPolySeq = S.visPolySeq;
+else
+    visPolySeq = cell(size(Vtheta_kymo, 1), 1);
+end
 nFrames = size(Vtheta_kymo, 1);
+
+% Raw per-boundary-point arrays (linear-interpolant pipeline) give a
+% strictly better velocity-axis estimate than the 101-bin kymograph,
+% because the Fourier phase is computed on ~500 native samples per
+% frame rather than bin-averages. Prefer them when present.
+haveRawVel = isfield(S, 'Vtheta_raw') && isfield(S, 'Theta_raw') && ...
+             iscell(S.Vtheta_raw) && iscell(S.Theta_raw);
+if haveRawVel
+    fprintf('Velocity axis: using Vtheta_raw / Theta_raw (native ~500 pts/frame).\n');
+else
+    fprintf('Velocity axis: using Vtheta_kymo (101 bins/frame).\n');
+end
+if haveShape
+    fprintf('Shape axis:    using visPolySeq.\n');
+else
+    fprintf('Shape axis:    DISABLED (visPolySeq missing).\n');
+end
 
 %% -------- NUCLEUS PICKER --------
 % Load existing image sequence if stored; otherwise fall back to the
@@ -83,24 +147,40 @@ fprintf('Picking nucleus on frame %d (click the nucleus center)...\n', firstQC);
 % moving nucleus, set clickFrames below to e.g. [firstQC, nFrames/2, nFrames].
 clickFrames = firstQC;
 
-% If visImageSeq wasn't saved, show a dummy blank image with the boundary
+% If visImageSeq wasn't saved, try to load the first State1 image from
+% base_dir (saved in results). Otherwise fall back to a blank canvas
+% sized to the boundary polygon (or to the centroid).
 if isempty(imgSeq{firstQC})
-    warning(['wave_axis_pipeline: visImageSeq not found in results. ' ...
-             'Showing boundary-only preview for nucleus click.']);
-    poly = visPolySeq{firstQC};
-    if isempty(poly)
-        error('wave_axis_pipeline: no boundary polygon for frame %d.', firstQC);
+    loadedImg = [];
+    if isfield(S, 'base_dir') && exist(S.base_dir, 'dir')
+        s1_list = dir(fullfile(S.base_dir, '*State1*'));
+        s1_list = s1_list(~[s1_list.isdir]);
+        s1_list = s1_list(arrayfun(@(d) d.name(1) ~= '.', s1_list));
+        if ~isempty(s1_list)
+            idxLoad = min(firstQC, numel(s1_list));
+            try
+                loadedImg = double(imread(fullfile(s1_list(idxLoad).folder, ...
+                                                    s1_list(idxLoad).name)));
+            catch
+                loadedImg = [];
+            end
+        end
     end
-    % Make a blank canvas slightly larger than the boundary bbox
-    pad = 50;
-    xmin = floor(min(poly(:,1))) - pad; xmax = ceil(max(poly(:,1))) + pad;
-    ymin = floor(min(poly(:,2))) - pad; ymax = ceil(max(poly(:,2))) + pad;
-    dummyI = zeros(ymax - ymin + 1, xmax - xmin + 1);
-    % Shift the polygon into the dummy frame for display (but then shift
-    % click back). Easier: just use absolute coords with imshow on a full
-    % blank canvas.
-    W = xmax; H = ymax;
-    imgSeq = {zeros(H, W)};
+    if ~isempty(loadedImg)
+        imgSeq = {loadedImg};
+    elseif haveShape && ~isempty(visPolySeq{firstQC})
+        warning('wave_axis_pipeline: using boundary-only preview for nucleus click.');
+        poly = visPolySeq{firstQC};
+        pad = 50;
+        xmax = ceil(max(poly(:,1))) + pad;
+        ymax = ceil(max(poly(:,2))) + pad;
+        imgSeq = {zeros(ymax, xmax)};
+    else
+        warning('wave_axis_pipeline: using centroid-only blank canvas for nucleus click.');
+        cxy = centroidXY(firstQC, :);
+        side = 2 * ceil(max(cxy) + 100);
+        imgSeq = {zeros(side, side)};
+    end
 end
 
 opts_pick = struct('frameIdx', clickFrames, 'nFramesTotal', nFrames);
@@ -131,7 +211,17 @@ for fr = 1:nFrames
     end
 
     % --- velocity axis ---
-    [p2, a2] = wave_axis_from_velocity(Vtheta_kymo(fr, :), thetaCenters);
+    if haveRawVel
+        vr = S.Vtheta_raw{fr};
+        tr = S.Theta_raw{fr};
+        if ~isempty(vr) && ~isempty(tr)
+            [p2, a2] = wave_axis_from_velocity(vr, tr);
+        else
+            [p2, a2] = wave_axis_from_velocity(Vtheta_kymo(fr, :), thetaCenters);
+        end
+    else
+        [p2, a2] = wave_axis_from_velocity(Vtheta_kymo(fr, :), thetaCenters);
+    end
     phi_vel(fr) = p2;
     amp_vel(fr) = a2;
 
@@ -185,8 +275,14 @@ fprintf('Radon-estimated global wave slope: %.3g rad/s (%.1f deg/min)\n', ...
     kymo_slope, rad2deg(kymo_slope) * 60);
 
 %% -------- DISCRETE WAVE EVENTS --------
-% Smooth amp_shape over time, detect peaks above (median + 2*MAD).
-amp_s = amp_shape;
+% Use shape amplitude if available; otherwise fall back to velocity amplitude.
+% Also track which primary metric drove detection (for downstream stats).
+if haveShape && any(isfinite(amp_shape))
+    amp_src = amp_shape;   primary = 'shape';
+else
+    amp_src = amp_vel;     primary = 'vel';
+end
+amp_s = amp_src;
 amp_s(~isfinite(amp_s)) = 0;
 win = max(3, round(5));    % 5-frame moving mean (tweak as needed)
 amp_sm = movmean(amp_s, win, 'omitnan');
@@ -197,8 +293,9 @@ thresh = med + 2 * mad_;
 [pks, locs] = findpeaks(amp_sm, 'MinPeakHeight', thresh, 'MinPeakDistance', win);
 
 waveEvents = struct('frame', {}, 'time_min', {}, 'phi_shape', {}, ...
-                    'phi_vel', {}, 'theta_nuc', {}, 'dPhi_shape', {}, ...
-                    'amp_shape', {});
+                    'phi_vel', {}, 'theta_nuc', {}, ...
+                    'dPhi_shape', {}, 'dPhi_vel', {}, 'amp', {}, ...
+                    'primary', {});
 for ii = 1:numel(locs)
     fr = locs(ii);
     waveEvents(ii).frame      = fr;
@@ -207,14 +304,23 @@ for ii = 1:numel(locs)
     waveEvents(ii).phi_vel    = phi_vel(fr);
     waveEvents(ii).theta_nuc  = theta_nuc(fr);
     waveEvents(ii).dPhi_shape = dPhi_shape(fr);
-    waveEvents(ii).amp_shape  = pks(ii);
+    waveEvents(ii).dPhi_vel   = dPhi_vel(fr);
+    waveEvents(ii).amp        = pks(ii);
+    waveEvents(ii).primary    = primary;
 end
-fprintf('Detected %d discrete wave events (amp threshold=%.3g).\n', numel(waveEvents), thresh);
+fprintf('Detected %d discrete wave events using %s amplitude (threshold=%.3g).\n', ...
+        numel(waveEvents), primary, thresh);
 
 %% -------- CIRCULAR STATS ON dPhi --------
-validE = arrayfun(@(e) isfinite(e.dPhi_shape), waveEvents);
+% Prefer shape-axis dPhi; fall back to velocity-axis dPhi when shape is absent.
+if strcmp(primary, 'shape')
+    dPhi_for_stats = arrayfun(@(e) e.dPhi_shape, waveEvents);
+else
+    dPhi_for_stats = arrayfun(@(e) e.dPhi_vel,   waveEvents);
+end
+validE = isfinite(dPhi_for_stats);
 if any(validE)
-    dPhiE = [waveEvents(validE).dPhi_shape];
+    dPhiE = dPhi_for_stats(validE);
     mean_resultant = mean(exp(1i * dPhiE));
     circ_mean = angle(mean_resultant);
     circ_R    = abs(mean_resultant);
@@ -222,8 +328,8 @@ if any(validE)
     n = numel(dPhiE);
     rayleigh_p = exp(-n * circ_R^2) * (1 + (2*n*circ_R^2 - (n*circ_R^2)^2) / (4*n));
     rayleigh_p = min(max(rayleigh_p, 0), 1);
-    fprintf('Event-level dPhi_shape: circ mean = %.1f deg, R = %.3f, Rayleigh p ~ %.3g (n=%d)\n', ...
-        rad2deg(circ_mean), circ_R, rayleigh_p, n);
+    fprintf('Event-level dPhi_%s: circ mean = %.1f deg, R = %.3f, Rayleigh p ~ %.3g (n=%d)\n', ...
+        primary, rad2deg(circ_mean), circ_R, rayleigh_p, n);
 else
     circ_mean  = NaN;
     circ_R     = NaN;
