@@ -98,11 +98,17 @@ for fr = 1:nFrames
     retardance_kymo(fr, :) = interp2(Iret, samplePts_px(:,1), samplePts_px(:,2), ...
                                      'linear', NaN);
 
-    % -- PIV: scatteredInterpolant on the (possibly non-uniform) grid
-    X = Xc{fr}; Y = Yc{fr}; U = Uc{fr}; V = Vc{fr};
+    % -- PIV: scatteredInterpolant on the (possibly non-uniform) grid.
+    % Cast to double — PIVlab can return single-precision arrays which
+    % scatteredInterpolant refuses.
+    X = double(Xc{fr}); Y = double(Yc{fr});
+    U = double(Uc{fr}); V = double(Vc{fr});
     if isempty(X) || isempty(U), continue; end
-    Fu = scatteredInterpolant(X(:), Y(:), U(:), 'linear', 'none');
-    Fv = scatteredInterpolant(X(:), Y(:), V(:), 'linear', 'none');
+    % Drop any NaN PIV samples before building the interpolant.
+    ok = isfinite(X(:)) & isfinite(Y(:)) & isfinite(U(:)) & isfinite(V(:));
+    if nnz(ok) < 4, continue; end
+    Fu = scatteredInterpolant(X(ok), Y(ok), U(ok), 'linear', 'none');
+    Fv = scatteredInterpolant(X(ok), Y(ok), V(ok), 'linear', 'none');
     u_s = Fu(samplePts_px(:,1), samplePts_px(:,2));
     v_s = Fv(samplePts_px(:,1), samplePts_px(:,2));
 
