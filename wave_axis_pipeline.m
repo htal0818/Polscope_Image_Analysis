@@ -48,6 +48,15 @@
 %      'tangential_kymo_results.mat' (from boundary_flows.m) or
 %      'tangential_linear_interp_results.mat' (from
 %      boundary_flows_linear_interpolant_approach.m).
+% If `resultsFile` was accidentally set to a directory (e.g.
+% resultsFile = outDir), we silently promote it to `resultsDir` so
+% auto-detection still works.
+if exist('resultsFile','var') && ~isempty(resultsFile) ...
+        && exist(resultsFile, 'file') ~= 2 && exist(resultsFile, 'dir') == 7
+    resultsDir  = resultsFile;
+    resultsFile = '';
+end
+
 if ~exist('resultsFile','var') || isempty(resultsFile)
     if ~exist('resultsDir','var') || isempty(resultsDir)
         % EDIT THIS to point to the output folder from either boundary_flows script.
