@@ -508,6 +508,11 @@ if makeQuiverOverlays
         vq = zeros(nQuiver, 1);
         vq_color = zeros(nQuiver, 1);
 
+        % Precompute boundary-point angles once per frame for nearest-theta
+        % lookup. This places arrow anchors on the actual boundary polygon,
+        % not at a faulty "mean radius of curvature" distance.
+        theta_poly = mod(atan2(poly(:,2) - yc, poly(:,1) - xc), 2*pi);
+
         for k = 1:nQuiver
             idx = thetaSubsample(k);
             theta_k = thetaCenters(idx);
@@ -518,11 +523,10 @@ if makeQuiverOverlays
                 continue;
             end
 
-            R_mean = mean(RADIUS_OF_CURVATURE(fr, :), 'omitnan');
-            if isnan(R_mean), R_mean = 100; end
-
-            xq(k) = xc + R_mean * cos(theta_k);
-            yq(k) = yc + R_mean * sin(theta_k);
+            % Anchor arrow at the boundary point closest to theta_k.
+            [~, nearest_idx] = min(abs(wrapTo2Pi(theta_poly) - wrapTo2Pi(theta_k)));
+            xq(k) = poly(nearest_idx, 1);
+            yq(k) = poly(nearest_idx, 2);
 
             % Tangent vector (perpendicular to radial)
             tx_k = -sin(theta_k);
