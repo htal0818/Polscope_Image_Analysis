@@ -1,37 +1,31 @@
 % wavefront_kymograph.m
-% Per-depth max-across-angles inward retardance profile -> depth-vs-time kymograph.
+% Per-cortex-sector (depth x time) kymographs — a tiled grid of inward
+% retardance profiles, one panel per angular sector around the cortex.
 %
 % Why this is a separate script from contour_retardance.m:
-%   contour_retardance.m angle-averages the inward retardance profile, which
-%   washes out the localized, weak alignment band that propagates inward
-%   during the contraction wave. This script keeps the angle resolution per
-%   frame, then reduces the (angle x depth) map to a 1D inward profile by
-%   taking, at each depth, the maximum across angles. Different depths in
-%   the same frame can independently pick different angles, so a wavefront
-%   that lives at one direction at depth A and another at depth B is
-%   preserved at full amplitude at both.
+%   contour_retardance.m's distKymo angle-averages every interior pixel
+%   into a single (depth x time) plot, which dilutes a wave living in one
+%   cortex sector with all the quiescent sectors at the same depth — the
+%   localized inward wavefront washes out. This script keeps the angle
+%   resolution and presents the result as small multiples: one
+%   (depth x time) kymograph per cortex sector. Wave-carrying sectors
+%   light up; quiescent sectors show only the cortex band. Reading across
+%   panels reveals where the wave is and how its arrival shifts around
+%   the cortex over time, with no angular averaging anywhere.
 %
-% The map per frame is computed in one vectorized accumarray pass over the
-% interior pixels using the distance transform — no per-angle ray loop, no
-% per-boundary-point loop, no 3D cube.
+% The map per frame is computed in one vectorized accumarray pass over
+% the interior pixels using the distance transform — no per-angle ray
+% loop, no per-boundary-point loop. The full (angle x depth x frame)
+% cube is stored so the user can re-render with a different choice of
+% panels offline without re-running segmentation.
 %
 % Inputs are the same image stacks consumed by contour_retardance.m
 % (4-state Polscope is the default; retardance and multipage are also
 % supported).
 %
-% Reduction rule (per frame): build slice(angle, depth), subtract its
-% angular mean to obtain the angular anomaly (the cortex band, which is
-% rotationally symmetric, cancels here), then take a per-depth max across
-% angles for both the raw slice and the anomaly. Each per-depth value can
-% come from a different angle, so the kymograph row is not locked to one
-% direction.
-%
 % Outputs (in outDir):
-%   inward_kymograph_perdepth_max_raw.png/.fig      per-depth max across angles, raw nm
-%   inward_kymograph_perdepth_max_anomaly.png/.fig  per-depth max across angles, angular-mean subtracted (wavefront only)
-%   argmax_angle_per_depth.png/.fig                 angle (deg) that won the per-depth max at each (depth, time) cell
-%   wave_peak_depth_vs_time.png/.fig                depth where the anomaly peaks vs time -> wave speed
-%   wavefront_kymograph_results.mat                 per-frame profiles + diagnostics
+%   radial_kymos_grid.png/.fig             tiled grid: nPanels (depth x time) kymographs at evenly spaced cortex sectors
+%   wavefront_kymograph_results.mat        full sliceCube + axes + diagnostics
 %
 % REQUIREMENTS:
 %   - Image Processing Toolbox
@@ -79,13 +73,13 @@ minArea            = 5000;         % minimum component area (px^2)
 % --- Angle x depth grid ---
 nAngleBins   = 120;     % angular bins around centroid (covers 0..2*pi)
 depthStep_um = 0.5;     % depth bin step (microns)
-maxDepth_um  = 10;      % how far inward from cortex to sample (microns)
+maxDepth_um  = 40;      % how far inward from cortex to sample (microns)
 
-% --- Selection denoising ---
-% Optional Gaussian smoothing along the angle dimension of the per-frame
-% (angle x depth) map before picking the max-peak angle. Stabilizes the
-% selection against single-bin noise. 0 disables.
-angleSmoothBins = 1;
+% --- Tiled-grid plot ---
+% Number of cortex sectors to display as separate (depth x time) panels.
+% 9 -> 3x3 grid; small enough to read each panel, dense enough to see how
+% wave arrival shifts panel-to-panel around the cortex.
+nPanels = 9;
 
 % --- Output ---
 outDir = fullfile(fileparts(mfilename('fullpath')), 'wavefront_kymograph_out');
@@ -176,20 +170,9 @@ depthEdges  = 0 : depthStep_um : maxDepth_um;
 depthAxis_um = (depthEdges(1:end-1) + depthEdges(2:end)) / 2;
 nDepth = numel(depthAxis_um);
 
-% Smoothing window for selection
-if angleSmoothBins > 0
-    smoothWin = 2 * ceil(3 * angleSmoothBins) + 1;
-else
-    smoothWin = 0;
-end
-
-% Per-frame outputs (no single chosen angle, no 3D cube)
-maxInward_nm        = nan(nFrames, nDepth);   % per-depth max across angles, raw retardance (nm)
-maxAnomaly_nm       = nan(nFrames, nDepth);   % per-depth max across angles, angular-mean subtracted (nm)
-avgInward_nm        = nan(nFrames, nDepth);   % per-frame angular mean (the rotationally symmetric part)
-peakAngleAt_depth   = nan(nFrames, nDepth);   % which angle (rad) contributed to each (frame, depth) cell
-peakDepth_um        = nan(nFrames, 1);        % depth where the anomaly profile peaks (= wavefront depth)
-peakValue_nm        = nan(nFrames, 1);        % anomaly value at peakDepth_um
+% Per-frame outputs: full (angle x depth x frame) cube + diagnostics.
+sliceCube           = nan(nAngleBins, nDepth, nFrames);  % all-angles, all-depths, all-frames retardance map
+avgInward_nm        = nan(nFrames, nDepth);              % per-frame angular mean (cross-check vs distKymo)
 centroidXY          = nan(nFrames, 2);
 fitRadius_um        = nan(nFrames, 1);
 
@@ -323,41 +306,15 @@ for fr = 1:nFrames
         [aBin(valid), dBin(valid)], retVals, ...
         [nAngleBins, nDepth], @mean, NaN);
 
-    % Per-frame angular mean (the rotationally symmetric part — cortex band
-    % lives mostly here). Subtracting it yields the angular anomaly, which
-    % isolates the localized wavefront from the dominant cortex envelope.
-    angMean   = mean(slice, 1, 'omitnan');           % 1 x nDepth
-    anomaly   = slice - angMean;                     % nA x nDepth
-    avgInward_nm(fr, :) = angMean;
+    % Store the full angle-resolved map; no reduction across angles. The
+    % grid plot below picks K rows from this cube to render as separate
+    % (depth x time) kymographs.
+    sliceCube(:, :, fr) = slice;
 
-    % Optional smoothing along the angle axis to stabilize the per-depth
-    % argmax (the row identity at each depth jitters less when adjacent
-    % angle bins are slightly smoothed). Selection still operates per depth.
-    if smoothWin > 0
-        anomaly_sel = smoothdata(anomaly, 1, 'gaussian', smoothWin, 'omitnan');
-    else
-        anomaly_sel = anomaly;
-    end
-
-    % Reduction: per depth, take the max across angles. Different depths
-    % can independently pick different angles, so the kymograph row is not
-    % locked to one direction — wavefronts at any cortex sector survive.
-    [maxInward_nm(fr, :),  ~]            = max(slice,       [], 1, 'omitnan');
-    [maxAnomaly_nm(fr, :), bestAIdxAtD]  = max(anomaly_sel, [], 1, 'omitnan');
-
-    % Record which angle won at each depth (diagnostic — shows angular
-    % structure of the wavefront over time).
-    validBin = ~isnan(maxAnomaly_nm(fr, :));
-    peakAngleAt_depth(fr, validBin) = angleCenters(bestAIdxAtD(validBin));
-
-    % Depth at which the anomaly profile peaks (= wavefront depth, for the
-    % wave-speed trajectory plot). Track the global max of the per-depth
-    % anomaly row.
-    [pkVal, pkIdx]   = max(maxAnomaly_nm(fr, :), [], 'omitnan');
-    if ~isnan(pkVal)
-        peakValue_nm(fr) = pkVal;
-        peakDepth_um(fr) = depthAxis_um(pkIdx);
-    end
+    % Per-frame angular mean — the rotationally symmetric part the cortex
+    % band lives in. Saved for cross-checking against contour_retardance's
+    % distKymo, which averages over all angles and so wash-out the wave.
+    avgInward_nm(fr, :) = mean(slice, 1, 'omitnan');
 
     if mod(fr, max(1, round(nFrames/10))) == 0
         fprintf('  Processed %d / %d frames (%.0f%%)\n', fr, nFrames, 100*fr/nFrames);
@@ -370,80 +327,56 @@ fprintf('Done! %.1f sec total (%.2f sec/frame)\n\n', elapsed, elapsed/nFrames);
 %% ========================== PLOTS =========================================
 fprintf('Generating plots...\n');
 
-% --- Plot 1: per-depth max across angles, raw retardance (nm) ---
-% Same axes as contour_retardance.m's distKymo, but `max` over angles
-% instead of `mean`. Angularly localized inward signal preserved at full
-% strength; cortex band roughly equal to the angle-averaged version since
-% it's already uniform across angles.
-fig1 = figure('Position', [100 100 900 500]);
-imagesc(depthAxis_um, time_min, maxInward_nm);
-set(gca, 'YDir', 'normal');
-xlabel('Depth from cortex (\mum)', 'FontSize', 12);
-ylabel('Time (min)', 'FontSize', 12);
-title('Inward retardance: per-depth max across angles (raw nm)', 'FontSize', 14);
-colormap parula; cb = colorbar;
+% Pick nPanels evenly spaced cortex sectors. The +1 / drop-end pattern
+% avoids putting the same panel at both 0 and 2*pi.
+panelIdx        = round(linspace(1, nAngleBins+1, nPanels+1));
+panelIdx(end)   = [];
+panelIdx        = unique(min(max(panelIdx, 1), nAngleBins));
+nPanelsActual   = numel(panelIdx);
+panelAngles_deg = rad2deg(angleCenters(panelIdx));
+
+% Pull the K (depth x time) panels out of the cube.
+panelData = squeeze(sliceCube(panelIdx, :, :));   % nPanels x nDepth x nFrames
+panelData = permute(panelData, [3 2 1]);          % nFrames x nDepth x nPanels
+
+% Shared color limits so panel amplitudes are comparable. Robust quantiles
+% avoid having one outlier panel saturate the colormap of the others.
+flat = panelData(~isnan(panelData));
+if isempty(flat)
+    clim_lo = 0; clim_hi = 1;
+else
+    clim_lo = quantile(flat, 0.02);
+    clim_hi = quantile(flat, 0.98);
+    if clim_hi <= clim_lo; clim_hi = clim_lo + eps; end
+end
+
+nRows = ceil(sqrt(nPanelsActual));
+nCols = ceil(nPanelsActual / nRows);
+
+fig = figure('Position', [100 100 1400 1100]);
+t = tiledlayout(nRows, nCols, 'TileSpacing', 'compact', 'Padding', 'compact');
+for k = 1:nPanelsActual
+    nexttile;
+    imagesc(depthAxis_um, time_min, panelData(:, :, k), [clim_lo clim_hi]);
+    set(gca, 'YDir', 'normal');
+    title(sprintf('\\theta = %.0f^{\\circ}', panelAngles_deg(k)));
+end
+xlabel(t, 'Depth from cortex (\mum)', 'FontSize', 12);
+ylabel(t, 'Time (min)', 'FontSize', 12);
+title(t, 'Inward retardance kymograph at each cortex sector', 'FontSize', 14);
+colormap(parula);
+cb = colorbar;
+cb.Layout.Tile  = 'east';
 cb.Label.String = 'Retardance (nm)';
 cb.Label.FontSize = 11;
-exportgraphics(fig1, fullfile(outDir, 'inward_kymograph_perdepth_max_raw.png'), 'Resolution', 200);
-savefig(fig1, fullfile(outDir, 'inward_kymograph_perdepth_max_raw.fig'));
-close(fig1);
-
-% --- Plot 2: per-depth max across angles, angular-mean subtracted ---
-% Cortex band cancels in the anomaly (rotationally symmetric); the
-% wavefront — angularly localized — remains as a streak whose slope vs
-% time is the inward propagation speed.
-fig2 = figure('Position', [100 100 900 500]);
-imagesc(depthAxis_um, time_min, maxAnomaly_nm);
-set(gca, 'YDir', 'normal');
-xlabel('Depth from cortex (\mum)', 'FontSize', 12);
-ylabel('Time (min)', 'FontSize', 12);
-title('Inward retardance anomaly: per-depth max across angles (wavefront only)', 'FontSize', 14);
-colormap parula; cb = colorbar;
-cb.Label.String = '\Delta Retardance vs angular mean (nm)';
-cb.Label.FontSize = 11;
-exportgraphics(fig2, fullfile(outDir, 'inward_kymograph_perdepth_max_anomaly.png'), 'Resolution', 200);
-savefig(fig2, fullfile(outDir, 'inward_kymograph_perdepth_max_anomaly.fig'));
-close(fig2);
-
-% --- Plot 3: which angle won at each (frame, depth) cell ---
-% Diagnostic: heatmap of the argmax-over-angles for the anomaly. Coherent
-% horizontal bands = the wavefront sits at a stable cortex sector across
-% depth; horizontal drift over time = the wave origin migrates.
-fig3 = figure('Position', [100 100 900 500]);
-imagesc(depthAxis_um, time_min, rad2deg(peakAngleAt_depth));
-set(gca, 'YDir', 'normal');
-xlabel('Depth from cortex (\mum)', 'FontSize', 12);
-ylabel('Time (min)', 'FontSize', 12);
-title('Argmax angle (deg) at each (depth, time) cell', 'FontSize', 13);
-colormap hsv; cb = colorbar;
-cb.Label.String = 'Angle (deg)';
-cb.Label.FontSize = 11;
-caxis([0 360]);
-exportgraphics(fig3, fullfile(outDir, 'argmax_angle_per_depth.png'), 'Resolution', 200);
-savefig(fig3, fullfile(outDir, 'argmax_angle_per_depth.fig'));
-close(fig3);
-
-% --- Plot 4: peak depth (band trajectory) over time ---
-% Depth at which the per-depth-max anomaly profile peaks each frame.
-% Slope vs time = wavefront inward propagation speed.
-fig4 = figure('Position', [100 100 800 400]);
-plot(time_min, peakDepth_um, 'b.-', 'LineWidth', 1.4, 'MarkerSize', 10);
-xlabel('Time (min)', 'FontSize', 12);
-ylabel('Peak depth from cortex (\mum)', 'FontSize', 12);
-title('Wavefront depth vs time (band trajectory)', 'FontSize', 13);
-grid on;
-exportgraphics(fig4, fullfile(outDir, 'wave_peak_depth_vs_time.png'), 'Resolution', 200);
-savefig(fig4, fullfile(outDir, 'wave_peak_depth_vs_time.fig'));
-close(fig4);
+exportgraphics(fig, fullfile(outDir, 'radial_kymos_grid.png'), 'Resolution', 200);
+savefig(fig, fullfile(outDir, 'radial_kymos_grid.fig'));
+close(fig);
 
 %% ========================== SAVE DATA =====================================
 results = struct();
-results.maxInward_nm        = maxInward_nm;          % per-depth max across angles, raw (nm)
-results.maxAnomaly_nm       = maxAnomaly_nm;         % per-depth max across angles, angular-mean subtracted (nm)
-results.avgInward_nm        = avgInward_nm;          % per-frame angular mean (the subtracted baseline)
-results.peakAngleAt_depth   = peakAngleAt_depth;     % argmax angle (rad) at each (frame, depth) cell
-results.peakDepth_um        = peakDepth_um;
-results.peakValue_nm        = peakValue_nm;
+results.sliceCube           = sliceCube;             % full angle x depth x frame retardance map (nm)
+results.avgInward_nm        = avgInward_nm;          % per-frame angular mean (cross-check vs distKymo)
 results.angleCenters_rad    = angleCenters;
 results.angleEdges_rad      = angleEdges;
 results.depthAxis_um        = depthAxis_um;
@@ -452,6 +385,9 @@ results.time_sec            = time_sec;
 results.time_min            = time_min;
 results.centroidXY          = centroidXY;
 results.fitRadius_um        = fitRadius_um;
+results.nPanels             = nPanelsActual;
+results.panelIdx            = panelIdx;
+results.panelAngles_deg     = panelAngles_deg;
 results.nFrames             = nFrames;
 results.dt_sec              = dt_sec;
 results.px_per_um           = px_per_um;
@@ -460,7 +396,6 @@ results.bit_depth           = bit_depth;
 results.nAngleBins          = nAngleBins;
 results.depthStep_um        = depthStep_um;
 results.maxDepth_um         = maxDepth_um;
-results.angleSmoothBins     = angleSmoothBins;
 results.thresholdMode       = thresholdMode;
 results.edgeMethod          = edgeMethod;
 results.inputMode           = inputMode;
