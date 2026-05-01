@@ -59,24 +59,26 @@ doCrop = false;
 cropRect = [500 500 2000 2000];
 
 % --- Calibration ---
-dt_sec    = 15;
-px_per_um = 6.25;
+dt_sec    = 20;
+px_per_um = 6.25/2;
 retardance_ceiling_nm = 50;
 bit_depth = 16;
 
-% --- Segmentation: edge-detection + morphology on the 4-state sum.
-%     Defaults match contour_retardance.m. ---
-thresholdMode    = 'edge';     % 'edge' or 'otsu'
-edgeMethod       = 'Canny';    % edge() method: 'Canny', 'Sobel', 'Prewitt', 'log'
-edgeDilateRadius = 3;          % dilation radius (px) to close edge gaps before fill
-sigmaBlur        = 20;         % Gaussian blur sigma (px)
-closeRadius      = 25;         % morphological close disk radius (px)
-minArea          = 5000;       % minimum component area (px^2)
+% --- Segmentation (defaults match contour_retardance.m's working setup) ---
+thresholdMode      = 'adaptive';   % 'adaptive', 'edge', 'gradient', 'otsu'
+adaptSensitivity   = 0.7;          % adaptthresh sensitivity [0..1]
+adaptNeighborhood  = 201;          % adaptthresh neighborhood (odd integer, px)
+edgeMethod         = 'Sobel';      % edge() method: 'Canny', 'Sobel', 'Prewitt', 'log'
+edgeDilateRadius   = 2;            % dilation radius (px)
+gradientPercentile = 70;           % gradient magnitude percentile for 'gradient'
+sigmaBlur          = 1;            % Gaussian blur sigma (px)
+closeRadius        = 1;            % morphological close disk radius (px)
+minArea            = 5000;         % minimum component area (px^2)
 
 % --- Angle x depth grid ---
 nAngleBins   = 120;     % angular bins around centroid (covers 0..2*pi)
 depthStep_um = 0.5;     % depth bin step (microns)
-maxDepth_um  = 20;      % how far inward from cortex to sample (microns)
+maxDepth_um  = 10;      % how far inward from cortex to sample (microns)
 
 % --- Selection denoising ---
 % Optional Gaussian smoothing along the angle dimension of the per-frame
@@ -112,7 +114,7 @@ switch inputMode
         readMask = @(t) double(imread(fullfile(ds{1}(t).folder, ds{1}(t).name))) ...
                       + double(imread(fullfile(ds{2}(t).folder, ds{2}(t).name))) ...
                       + double(imread(fullfile(ds{3}(t).folder, ds{3}(t).name))) ...
-                      + double(imread(fullfile(ds{4}(t).folder, ds{4}(t).name)));
+                      + double(imread(fullfile(ds{4}(t).folder, ds{4}(t).name)))/4;
 
         d = dir(fullfile(base_dir, retardance_pattern));
         if isempty(d)
@@ -214,24 +216,40 @@ for fr = 1:nFrames
         segFromMask = false;
     end
 
-    % --- Segmentation ---
-    I_blur = imgaussfilt(Iseg, sigmaBlur);
-    I_norm = I_blur / max(I_blur(:));
+    % --- Segmentation (mirrors contour_retardance.m) ---
+    I_blur = imgaussfilt(Iseg, sigmaBlur); %#ok<NASGU>
+    I_norm = I_blur / max(I_blur(:));      %#ok<NASGU>
 
     switch thresholdMode
+        case 'adaptive'
+            T = adaptthresh(Iseg);
+            BW = imbinarize(Iseg, T);
+            if segFromMask
+                BW = ~BW;
+            end
+
         case 'edge'
-            edges = edge(I_norm, edgeMethod);
+            edges = edge(Iseg, edgeMethod);
             se_edge = strel('disk', edgeDilateRadius);
-            edges = imdilate(edges, se_edge);
+            edges = imerode(edges, se_edge);
             BW = imfill(edges, 'holes');
-            % If we segmented from a "dark oocyte" 4-state sum and the
-            % filled mask covers most of the frame, invert.
+            if segFromMask && sum(BW(:)) > 0.5 * numel(BW)
+                BW = ~BW;
+            end
+
+        case 'gradient'
+            [Gmag, ~] = imgradient(Iseg);
+            thrG = prctile(Gmag(:), gradientPercentile);
+            BW_edges = Gmag >= thrG;
+            se_edge = strel('disk', edgeDilateRadius);
+            BW_edges = imerode(BW_edges, se_edge);
+            BW = imfill(BW_edges, 'holes');
             if segFromMask && sum(BW(:)) > 0.5 * numel(BW)
                 BW = ~BW;
             end
 
         case 'otsu'
-            Totsu  = graythresh(I_norm);
+            Totsu = graythresh(I_norm);
             if segFromMask
                 BW = I_norm < Totsu;
             else
@@ -242,12 +260,23 @@ for fr = 1:nFrames
             error('Unknown thresholdMode: %s', thresholdMode);
     end
 
+    % Aggressive morphological cleanup
     se = strel('disk', closeRadius);
     BW = imclose(BW, se);
     BW = imfill(BW, 'holes');
     BW = bwareaopen(BW, minArea);
 
-    % Keep largest component
+    % Fallback: gradient-based if threshold fails
+    if ~any(BW(:))
+        [Gmag, ~] = imgradient(Iseg);
+        thrG = max(2*mean(Gmag(:)), prctile(Gmag(:), 90));
+        BW = Gmag >= thrG;
+        BW = imclose(BW, se);
+        BW = imfill(BW, 'holes');
+        BW = bwareaopen(BW, minArea);
+    end
+
+    % Keep largest connected component (fall back to cached mask on failure)
     L = bwlabel(BW, 8);
     if max(L(:)) >= 1
         S = regionprops(L, 'Area');
