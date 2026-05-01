@@ -1,36 +1,37 @@
 % wavefront_kymograph.m
-% Per-frame max-peak inward retardance profile -> depth-vs-time kymograph.
+% Per-depth max-across-angles inward retardance profile -> depth-vs-time kymograph.
 %
 % Why this is a separate script from contour_retardance.m:
 %   contour_retardance.m angle-averages the inward retardance profile, which
 %   washes out the localized, weak alignment band that propagates inward
 %   during the contraction wave. This script keeps the angle resolution per
-%   frame, then uses an angular-anomaly criterion (subtract the per-frame
-%   angular mean before selection) so the rotationally symmetric cortex band
-%   cancels and the chosen direction is the one carrying the localized
-%   wavefront.
+%   frame, then reduces the (angle x depth) map to a 1D inward profile by
+%   taking, at each depth, the maximum across angles. Different depths in
+%   the same frame can independently pick different angles, so a wavefront
+%   that lives at one direction at depth A and another at depth B is
+%   preserved at full amplitude at both.
 %
 % The map per frame is computed in one vectorized accumarray pass over the
 % interior pixels using the distance transform — no per-angle ray loop, no
-% per-boundary-point loop. Only the chosen 1D profile (raw + anomaly) is
-% kept per frame (no 3D cube).
+% per-boundary-point loop, no 3D cube.
 %
 % Inputs are the same image stacks consumed by contour_retardance.m
 % (4-state Polscope is the default; retardance and multipage are also
 % supported).
 %
-% Selection rule: per frame, subtract the angular mean of the (angle x depth)
-% map (this kills the rotationally symmetric cortex band), then pick the
-% angle whose anomaly profile peaks the highest. The cortex band cancels in
-% the anomaly so the chosen direction is driven by the localized wavefront,
-% not by the brightest cortex.
+% Reduction rule (per frame): build slice(angle, depth), subtract its
+% angular mean to obtain the angular anomaly (the cortex band, which is
+% rotationally symmetric, cancels here), then take a per-depth max across
+% angles for both the raw slice and the anomaly. Each per-depth value can
+% come from a different angle, so the kymograph row is not locked to one
+% direction.
 %
 % Outputs (in outDir):
-%   inward_kymograph_chosen_angle_raw.png/.fig      chosen-angle raw inward profile per frame (nm)
-%   inward_kymograph_chosen_angle_anomaly.png/.fig  same but with the angular mean subtracted (wavefront only)
-%   wave_origin_angle_vs_time.png/.fig              chosen direction over time
+%   inward_kymograph_perdepth_max_raw.png/.fig      per-depth max across angles, raw nm
+%   inward_kymograph_perdepth_max_anomaly.png/.fig  per-depth max across angles, angular-mean subtracted (wavefront only)
+%   argmax_angle_per_depth.png/.fig                 angle (deg) that won the per-depth max at each (depth, time) cell
 %   wave_peak_depth_vs_time.png/.fig                depth where the anomaly peaks vs time -> wave speed
-%   wavefront_kymograph_results.mat                 per-frame profiles + selections
+%   wavefront_kymograph_results.mat                 per-frame profiles + diagnostics
 %
 % REQUIREMENTS:
 %   - Image Processing Toolbox
@@ -182,16 +183,15 @@ else
     smoothWin = 0;
 end
 
-% Per-frame outputs (no 3D cube — only the chosen 1D profile per frame)
-maxInward_nm     = nan(nFrames, nDepth);   % chosen-angle raw inward profile
-anomalyInward_nm = nan(nFrames, nDepth);   % chosen-angle anomaly (slice - per-frame angular mean)
-avgInward_nm     = nan(nFrames, nDepth);   % per-frame angular mean (the rotationally symmetric part)
-bestAngleIdx     = nan(nFrames, 1);
-bestAngle_rad    = nan(nFrames, 1);
-peakDepth_um     = nan(nFrames, 1);        % depth where the anomaly peaks (= wavefront depth)
-peakValue_nm     = nan(nFrames, 1);        % anomaly value at peakDepth_um
-centroidXY       = nan(nFrames, 2);
-fitRadius_um     = nan(nFrames, 1);
+% Per-frame outputs (no single chosen angle, no 3D cube)
+maxInward_nm        = nan(nFrames, nDepth);   % per-depth max across angles, raw retardance (nm)
+maxAnomaly_nm       = nan(nFrames, nDepth);   % per-depth max across angles, angular-mean subtracted (nm)
+avgInward_nm        = nan(nFrames, nDepth);   % per-frame angular mean (the rotationally symmetric part)
+peakAngleAt_depth   = nan(nFrames, nDepth);   % which angle (rad) contributed to each (frame, depth) cell
+peakDepth_um        = nan(nFrames, 1);        % depth where the anomaly profile peaks (= wavefront depth)
+peakValue_nm        = nan(nFrames, 1);        % anomaly value at peakDepth_um
+centroidXY          = nan(nFrames, 2);
+fitRadius_um        = nan(nFrames, 1);
 
 cache_prevBW = [];
 
@@ -330,27 +330,30 @@ for fr = 1:nFrames
     anomaly   = slice - angMean;                     % nA x nDepth
     avgInward_nm(fr, :) = angMean;
 
-    % Optional smoothing along the angle axis to stabilize selection.
+    % Optional smoothing along the angle axis to stabilize the per-depth
+    % argmax (the row identity at each depth jitters less when adjacent
+    % angle bins are slightly smoothed). Selection still operates per depth.
     if smoothWin > 0
         anomaly_sel = smoothdata(anomaly, 1, 'gaussian', smoothWin, 'omitnan');
     else
         anomaly_sel = anomaly;
     end
 
-    % Selection: pick the angle whose ANOMALY peaks highest. This rejects
-    % the cortex band (which cancels in `anomaly`) so the chosen direction
-    % is the one with the strongest localized inward feature.
-    perAnglePeak = max(anomaly_sel, [], 2, 'omitnan');
-    [bestPeak, aBest] = max(perAnglePeak, [], 'omitnan');
-    if isnan(bestPeak); continue; end
+    % Reduction: per depth, take the max across angles. Different depths
+    % can independently pick different angles, so the kymograph row is not
+    % locked to one direction — wavefronts at any cortex sector survive.
+    [maxInward_nm(fr, :),  ~]            = max(slice,       [], 1, 'omitnan');
+    [maxAnomaly_nm(fr, :), bestAIdxAtD]  = max(anomaly_sel, [], 1, 'omitnan');
 
-    bestAngleIdx(fr)        = aBest;
-    bestAngle_rad(fr)       = angleCenters(aBest);
-    maxInward_nm(fr, :)     = slice(aBest, :);     % raw nm at the chosen angle
-    anomalyInward_nm(fr, :) = anomaly(aBest, :);   % wavefront-only profile at the chosen angle
+    % Record which angle won at each depth (diagnostic — shows angular
+    % structure of the wavefront over time).
+    validBin = ~isnan(maxAnomaly_nm(fr, :));
+    peakAngleAt_depth(fr, validBin) = angleCenters(bestAIdxAtD(validBin));
 
-    % Depth at which the anomaly (wavefront) peaks in the chosen direction.
-    [pkVal, pkIdx]  = max(anomaly(aBest, :), [], 'omitnan');
+    % Depth at which the anomaly profile peaks (= wavefront depth, for the
+    % wave-speed trajectory plot). Track the global max of the per-depth
+    % anomaly row.
+    [pkVal, pkIdx]   = max(maxAnomaly_nm(fr, :), [], 'omitnan');
     if ~isnan(pkVal)
         peakValue_nm(fr) = pkVal;
         peakDepth_um(fr) = depthAxis_um(pkIdx);
@@ -367,50 +370,62 @@ fprintf('Done! %.1f sec total (%.2f sec/frame)\n\n', elapsed, elapsed/nFrames);
 %% ========================== PLOTS =========================================
 fprintf('Generating plots...\n');
 
-% --- Plot 1: raw inward profile at the chosen angle (interpretable nm) ---
-% Selection used the angular anomaly so the cortex band doesn't dominate
-% the choice; here we plot the actual retardance values for that direction.
+% --- Plot 1: per-depth max across angles, raw retardance (nm) ---
+% Same axes as contour_retardance.m's distKymo, but `max` over angles
+% instead of `mean`. Angularly localized inward signal preserved at full
+% strength; cortex band roughly equal to the angle-averaged version since
+% it's already uniform across angles.
 fig1 = figure('Position', [100 100 900 500]);
 imagesc(depthAxis_um, time_min, maxInward_nm);
 set(gca, 'YDir', 'normal');
 xlabel('Depth from cortex (\mum)', 'FontSize', 12);
 ylabel('Time (min)', 'FontSize', 12);
-title('Inward retardance profile at chosen angle (raw nm)', 'FontSize', 14);
+title('Inward retardance: per-depth max across angles (raw nm)', 'FontSize', 14);
 colormap parula; cb = colorbar;
 cb.Label.String = 'Retardance (nm)';
 cb.Label.FontSize = 11;
-exportgraphics(fig1, fullfile(outDir, 'inward_kymograph_chosen_angle_raw.png'), 'Resolution', 200);
-savefig(fig1, fullfile(outDir, 'inward_kymograph_chosen_angle_raw.fig'));
+exportgraphics(fig1, fullfile(outDir, 'inward_kymograph_perdepth_max_raw.png'), 'Resolution', 200);
+savefig(fig1, fullfile(outDir, 'inward_kymograph_perdepth_max_raw.fig'));
 close(fig1);
 
-% --- Plot 2: anomaly inward profile at the chosen angle (wavefront only) ---
-% Per-frame angular mean has been subtracted, so the rotationally symmetric
-% cortex band is gone and only the localized wavefront remains.
+% --- Plot 2: per-depth max across angles, angular-mean subtracted ---
+% Cortex band cancels in the anomaly (rotationally symmetric); the
+% wavefront — angularly localized — remains as a streak whose slope vs
+% time is the inward propagation speed.
 fig2 = figure('Position', [100 100 900 500]);
-imagesc(depthAxis_um, time_min, anomalyInward_nm);
+imagesc(depthAxis_um, time_min, maxAnomaly_nm);
 set(gca, 'YDir', 'normal');
 xlabel('Depth from cortex (\mum)', 'FontSize', 12);
 ylabel('Time (min)', 'FontSize', 12);
-title('Inward retardance anomaly at chosen angle (wavefront only)', 'FontSize', 14);
+title('Inward retardance anomaly: per-depth max across angles (wavefront only)', 'FontSize', 14);
 colormap parula; cb = colorbar;
 cb.Label.String = '\Delta Retardance vs angular mean (nm)';
 cb.Label.FontSize = 11;
-exportgraphics(fig2, fullfile(outDir, 'inward_kymograph_chosen_angle_anomaly.png'), 'Resolution', 200);
-savefig(fig2, fullfile(outDir, 'inward_kymograph_chosen_angle_anomaly.fig'));
+exportgraphics(fig2, fullfile(outDir, 'inward_kymograph_perdepth_max_anomaly.png'), 'Resolution', 200);
+savefig(fig2, fullfile(outDir, 'inward_kymograph_perdepth_max_anomaly.fig'));
 close(fig2);
 
-% --- Plot 3: chosen direction (wave origin angle) over time ---
-fig3 = figure('Position', [100 100 800 400]);
-plot(time_min, rad2deg(bestAngle_rad), 'k.-', 'LineWidth', 1.2, 'MarkerSize', 10);
-xlabel('Time (min)', 'FontSize', 12);
-ylabel('Wave origin angle (deg)', 'FontSize', 12);
-title('Selected radial direction (max inward peak) over time', 'FontSize', 13);
-ylim([0 360]); grid on;
-exportgraphics(fig3, fullfile(outDir, 'wave_origin_angle_vs_time.png'), 'Resolution', 200);
-savefig(fig3, fullfile(outDir, 'wave_origin_angle_vs_time.fig'));
+% --- Plot 3: which angle won at each (frame, depth) cell ---
+% Diagnostic: heatmap of the argmax-over-angles for the anomaly. Coherent
+% horizontal bands = the wavefront sits at a stable cortex sector across
+% depth; horizontal drift over time = the wave origin migrates.
+fig3 = figure('Position', [100 100 900 500]);
+imagesc(depthAxis_um, time_min, rad2deg(peakAngleAt_depth));
+set(gca, 'YDir', 'normal');
+xlabel('Depth from cortex (\mum)', 'FontSize', 12);
+ylabel('Time (min)', 'FontSize', 12);
+title('Argmax angle (deg) at each (depth, time) cell', 'FontSize', 13);
+colormap hsv; cb = colorbar;
+cb.Label.String = 'Angle (deg)';
+cb.Label.FontSize = 11;
+caxis([0 360]);
+exportgraphics(fig3, fullfile(outDir, 'argmax_angle_per_depth.png'), 'Resolution', 200);
+savefig(fig3, fullfile(outDir, 'argmax_angle_per_depth.fig'));
 close(fig3);
 
 % --- Plot 4: peak depth (band trajectory) over time ---
+% Depth at which the per-depth-max anomaly profile peaks each frame.
+% Slope vs time = wavefront inward propagation speed.
 fig4 = figure('Position', [100 100 800 400]);
 plot(time_min, peakDepth_um, 'b.-', 'LineWidth', 1.4, 'MarkerSize', 10);
 xlabel('Time (min)', 'FontSize', 12);
@@ -423,11 +438,10 @@ close(fig4);
 
 %% ========================== SAVE DATA =====================================
 results = struct();
-results.maxInward_nm        = maxInward_nm;          % chosen-angle raw inward profile per frame
-results.anomalyInward_nm    = anomalyInward_nm;      % chosen-angle (slice - per-frame angular mean)
+results.maxInward_nm        = maxInward_nm;          % per-depth max across angles, raw (nm)
+results.maxAnomaly_nm       = maxAnomaly_nm;         % per-depth max across angles, angular-mean subtracted (nm)
 results.avgInward_nm        = avgInward_nm;          % per-frame angular mean (the subtracted baseline)
-results.bestAngleIdx        = bestAngleIdx;
-results.bestAngle_rad       = bestAngle_rad;
+results.peakAngleAt_depth   = peakAngleAt_depth;     % argmax angle (rad) at each (frame, depth) cell
 results.peakDepth_um        = peakDepth_um;
 results.peakValue_nm        = peakValue_nm;
 results.angleCenters_rad    = angleCenters;
