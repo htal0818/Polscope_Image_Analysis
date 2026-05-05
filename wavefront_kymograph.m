@@ -1,36 +1,47 @@
 % wavefront_kymograph.m
-% Per-frame max-peak inward retardance profile -> depth-vs-time kymograph.
+% Per-angle (depth x time) carpet view of inward retardance.
 %
 % Why this is a separate script from contour_retardance.m:
-%   contour_retardance.m angle-averages the inward retardance profile, which
-%   washes out the localized, weak alignment band that propagates inward
-%   during the contraction wave. This script keeps the angle resolution per
-%   frame, then uses an angular-anomaly criterion (subtract the per-frame
-%   angular mean before selection) so the rotationally symmetric cortex band
-%   cancels and the chosen direction is the one carrying the localized
-%   wavefront.
+%   contour_retardance.m's distKymo (depth x time) angle-averages every
+%   interior pixel at each depth, which washes out angle-localized internal
+%   signals: a feature in 1/N of the cortex contributes ~1/N to the average
+%   while the bright cortex band dominates everywhere. The user-confirmed
+%   wash-out shows only the cortex stripe; known waves at ~25 um depth
+%   never appear in distKymo.
 %
-% The map per frame is computed in one vectorized accumarray pass over the
-% interior pixels using the distance transform — no per-angle ray loop, no
-% per-boundary-point loop. Only the chosen 1D profile (raw + anomaly) is
-% kept per frame (no 3D cube).
+%   This script builds the full (angle x depth x frame) cube once, then
+%   stacks every angle's (depth x time) kymograph vertically into a single
+%   "carpet" image. No reductions, no angle-picking, no thresholding —
+%   the user inspects the carpet directly to see which angles carry the
+%   wave and how it propagates around the cortex.
 %
+% Carpet structure:
+%   - Y axis: (angle, depth) flattened. Each contiguous block of nDepth
+%     rows is one angle's depth-vs-time panel, with depth=0 (cortex) at
+%     the block's top row and increasing depth going down within the
+%     block. Angle blocks are stacked from theta=0 (top) to theta=2*pi
+%     (bottom).
+%   - X axis: time (shared across all angles).
+%   - Pixel value: retardance at that (angle, depth, time) in nm.
+%   - Faint horizontal separators every nDepth rows mark angle blocks.
+%   - Y-axis ticks at block centres are labelled with theta in degrees
+%     (every Nth angle to avoid crowding).
+%
+% A wave in one cortex sector appears as a localized streak below one
+% (or a few contiguous) cortex-stripe rows. With nAngleBins=100 and
+% ~10 underlying cortex sectors the wave shows up as a "thick" band of
+% ~10 contiguous similar streaks — redundancy that aids detection
+% rather than diluting it (each sector's panel is independently kept).
+%
+% The per-frame (angle x depth) map is computed in one vectorized
+% accumarray pass over the interior pixels using the distance transform.
 % Inputs are the same image stacks consumed by contour_retardance.m
 % (4-state Polscope is the default; retardance and multipage are also
 % supported).
 %
-% Selection rule: per frame, subtract the angular mean of the (angle x depth)
-% map (this kills the rotationally symmetric cortex band), then pick the
-% angle whose anomaly profile peaks the highest. The cortex band cancels in
-% the anomaly so the chosen direction is driven by the localized wavefront,
-% not by the brightest cortex.
-%
 % Outputs (in outDir):
-%   inward_kymograph_chosen_angle_raw.png/.fig      chosen-angle raw inward profile per frame (nm)
-%   inward_kymograph_chosen_angle_anomaly.png/.fig  same but with the angular mean subtracted (wavefront only)
-%   wave_origin_angle_vs_time.png/.fig              chosen direction over time
-%   wave_peak_depth_vs_time.png/.fig                depth where the anomaly peaks vs time -> wave speed
-%   wavefront_kymograph_results.mat                 per-frame profiles + selections
+%   carpet_per_angle.png/.fig          per-angle (depth x time) carpet
+%   wavefront_kymograph_results.mat    full cube + carpet + axes + diagnostics
 %
 % REQUIREMENTS:
 %   - Image Processing Toolbox
@@ -78,11 +89,10 @@ nAngleBins   = 100;     % angular bins around centroid (covers 0..2*pi)
 depthStep_um = 0.5;     % depth bin step (microns)
 maxDepth_um  = 50;      % how far inward from cortex to sample (microns)
 
-% --- Selection denoising ---
-% Optional Gaussian smoothing along the angle dimension of the per-frame
-% (angle x depth) map before picking the max-peak angle. Stabilizes the
-% selection against single-bin noise. 0 disables.
-angleSmoothBins = 1;
+% --- Carpet plot appearance ---
+carpetAngleLabelEvery = 10;     % label every Nth angle on the Y-axis
+carpetSeparatorAlpha  = 0.25;   % opacity of the inter-angle-block separator lines
+carpetClimQuantiles   = [0.02 0.98];  % robust color limits
 
 % --- Output ---
 outDir = fullfile(fileparts(mfilename('fullpath')), 'wavefront_kymograph_out');
@@ -173,23 +183,10 @@ depthEdges  = 0 : depthStep_um : maxDepth_um;
 depthAxis_um = (depthEdges(1:end-1) + depthEdges(2:end)) / 2;
 nDepth = numel(depthAxis_um);
 
-% Smoothing window for selection
-if angleSmoothBins > 0
-    smoothWin = 2 * ceil(3 * angleSmoothBins) + 1;
-else
-    smoothWin = 0;
-end
-
-% Per-frame outputs (no 3D cube — only the chosen 1D profile per frame)
-maxInward_nm     = nan(nFrames, nDepth);   % chosen-angle raw inward profile
-anomalyInward_nm = nan(nFrames, nDepth);   % chosen-angle anomaly (slice - per-frame angular mean)
-avgInward_nm     = nan(nFrames, nDepth);   % per-frame angular mean (the rotationally symmetric part)
-bestAngleIdx     = nan(nFrames, 1);
-bestAngle_rad    = nan(nFrames, 1);
-peakDepth_um     = nan(nFrames, 1);        % depth where the anomaly peaks (= wavefront depth)
-peakValue_nm     = nan(nFrames, 1);        % anomaly value at peakDepth_um
-centroidXY       = nan(nFrames, 2);
-fitRadius_um     = nan(nFrames, 1);
+% Full (angle x depth x frame) cube — every per-frame slice is stored intact.
+sliceCube    = nan(nAngleBins, nDepth, nFrames);
+centroidXY   = nan(nFrames, 2);
+fitRadius_um = nan(nFrames, 1);
 
 cache_prevBW = [];
 
@@ -294,38 +291,7 @@ for fr = 1:nFrames
         [aBin(valid), dBin(valid)], retVals, ...
         [nAngleBins, nDepth], @mean, NaN);
 
-    % Per-frame angular mean (the rotationally symmetric part — cortex band
-    % lives mostly here). Subtracting it yields the angular anomaly, which
-    % isolates the localized wavefront from the dominant cortex envelope.
-    angMean   = mean(slice, 1, 'omitnan');           % 1 x nDepth
-    anomaly   = slice - angMean;                     % nA x nDepth
-    avgInward_nm(fr, :) = angMean;
-
-    % Optional smoothing along the angle axis to stabilize selection.
-    if smoothWin > 0
-        anomaly_sel = smoothdata(anomaly, 1, 'gaussian', smoothWin, 'omitnan');
-    else
-        anomaly_sel = anomaly;
-    end
-
-    % Selection: pick the angle whose ANOMALY peaks highest. This rejects
-    % the cortex band (which cancels in `anomaly`) so the chosen direction
-    % is the one with the strongest localized inward feature.
-    perAnglePeak = max(anomaly_sel, [], 2, 'omitnan');
-    [bestPeak, aBest] = max(perAnglePeak, [], 'omitnan');
-    if isnan(bestPeak); continue; end
-
-    bestAngleIdx(fr)        = aBest;
-    bestAngle_rad(fr)       = angleCenters(aBest);
-    maxInward_nm(fr, :)     = slice(aBest, :);     % raw nm at the chosen angle
-    anomalyInward_nm(fr, :) = anomaly(aBest, :);   % wavefront-only profile at the chosen angle
-
-    % Depth at which the anomaly (wavefront) peaks in the chosen direction.
-    [pkVal, pkIdx]  = max(anomaly(aBest, :), [], 'omitnan');
-    if ~isnan(pkVal)
-        peakValue_nm(fr) = pkVal;
-        peakDepth_um(fr) = depthAxis_um(pkIdx);
-    end
+    sliceCube(:, :, fr) = slice;
 
     if mod(fr, max(1, round(nFrames/10))) == 0
         fprintf('  Processed %d / %d frames (%.0f%%)\n', fr, nFrames, 100*fr/nFrames);
@@ -335,72 +301,68 @@ end
 elapsed = toc;
 fprintf('Done! %.1f sec total (%.2f sec/frame)\n\n', elapsed, elapsed/nFrames);
 
-%% ========================== PLOTS =========================================
-fprintf('Generating plots...\n');
+%% ========================== CARPET ASSEMBLY ===============================
+% Reshape (nAngleBins x nDepth x nFrames) cube into a 2D carpet image.
+% After permute, the in-memory axis order is (depth, angle, frame).
+% Column-major reshape over the first two dims stacks angle blocks
+% vertically with depth contiguous within each block: rows 1..nDepth =
+% angle 1 (depth 0 at top, increasing depth down), rows nDepth+1..2*nDepth
+% = angle 2, and so on.
+carpet = reshape(permute(sliceCube, [2 1 3]), ...
+                 [nDepth * nAngleBins, nFrames]);   % rows x time-cols
 
-% --- Plot 1: raw inward profile at the chosen angle (interpretable nm) ---
-% Selection used the angular anomaly so the cortex band doesn't dominate
-% the choice; here we plot the actual retardance values for that direction.
-fig1 = figure('Position', [100 100 900 500]);
-imagesc(depthAxis_um, time_min, maxInward_nm);
-set(gca, 'YDir', 'normal');
-xlabel('Depth from cortex (\mum)', 'FontSize', 12);
-ylabel('Time (min)', 'FontSize', 12);
-title('Inward retardance profile at chosen angle (raw nm)', 'FontSize', 14);
-colormap parula; cb = colorbar;
-cb.Label.String = 'Retardance (nm)';
+%% ========================== PLOT ==========================================
+fprintf('Generating carpet plot...\n');
+
+fig = figure('Position', [80 60 900 1400]);
+ax  = axes('Parent', fig);
+imagesc(ax, time_min, 1:size(carpet,1), carpet);
+set(ax, 'YDir', 'reverse');                   % depth=0 at top of each block
+xlabel(ax, 'Time (min)', 'FontSize', 12);
+ylabel(ax, 'Angle around cortex (deg)  \rightarrow  depth within block (\mum)', ...
+       'FontSize', 12);
+title(ax, 'Per-angle inward retardance — carpet view', 'FontSize', 14);
+
+% Robust color limits over the whole carpet
+finiteVals = carpet(isfinite(carpet));
+if ~isempty(finiteVals)
+    qLo = quantile(finiteVals, carpetClimQuantiles(1));
+    qHi = quantile(finiteVals, carpetClimQuantiles(2));
+    if qHi > qLo
+        caxis(ax, [qLo qHi]);
+    end
+end
+colormap(ax, parula);
+cb = colorbar(ax);
+cb.Label.String   = 'Retardance (nm)';
 cb.Label.FontSize = 11;
-exportgraphics(fig1, fullfile(outDir, 'inward_kymograph_chosen_angle_raw.png'), 'Resolution', 200);
-savefig(fig1, fullfile(outDir, 'inward_kymograph_chosen_angle_raw.fig'));
-close(fig1);
 
-% --- Plot 2: anomaly inward profile at the chosen angle (wavefront only) ---
-% Per-frame angular mean has been subtracted, so the rotationally symmetric
-% cortex band is gone and only the localized wavefront remains.
-fig2 = figure('Position', [100 100 900 500]);
-imagesc(depthAxis_um, time_min, anomalyInward_nm);
-set(gca, 'YDir', 'normal');
-xlabel('Depth from cortex (\mum)', 'FontSize', 12);
-ylabel('Time (min)', 'FontSize', 12);
-title('Inward retardance anomaly at chosen angle (wavefront only)', 'FontSize', 14);
-colormap parula; cb = colorbar;
-cb.Label.String = '\Delta Retardance vs angular mean (nm)';
-cb.Label.FontSize = 11;
-exportgraphics(fig2, fullfile(outDir, 'inward_kymograph_chosen_angle_anomaly.png'), 'Resolution', 200);
-savefig(fig2, fullfile(outDir, 'inward_kymograph_chosen_angle_anomaly.fig'));
-close(fig2);
+% Faint horizontal separators between angle blocks
+hold(ax, 'on');
+for a = 1:(nAngleBins - 1)
+    yLine = a * nDepth + 0.5;
+    line(ax, ax.XLim, [yLine yLine], ...
+         'Color', [0 0 0 carpetSeparatorAlpha], ...
+         'LineWidth', 0.5);
+end
+hold(ax, 'off');
 
-% --- Plot 3: chosen direction (wave origin angle) over time ---
-fig3 = figure('Position', [100 100 800 400]);
-plot(time_min, rad2deg(bestAngle_rad), 'r.-', 'LineWidth', 1.2, 'MarkerSize', 10);
-xlabel('Time (min)', 'FontSize', 12);
-ylabel('Wave origin angle (deg)', 'FontSize', 12);
-title('Selected radial direction (max inward peak) over time', 'FontSize', 13);
-ylim([0 360]); grid on;
-exportgraphics(fig3, fullfile(outDir, 'wave_origin_angle_vs_time.png'), 'Resolution', 200);
-savefig(fig3, fullfile(outDir, 'wave_origin_angle_vs_time.fig'));
-close(fig3);
+% Y-ticks at block centres, labelled with theta in degrees.
+blockCentres = ((1:nAngleBins) - 0.5) * nDepth + 0.5;
+labelMask    = mod(0:nAngleBins-1, carpetAngleLabelEvery) == 0;
+ax.YTick      = blockCentres(labelMask);
+ax.YTickLabel = arrayfun(@(rad) sprintf('%.0f\\circ', rad2deg(rad)), ...
+                         angleCenters(labelMask), ...
+                         'UniformOutput', false);
 
-% --- Plot 4: peak depth (band trajectory) over time ---
-fig4 = figure('Position', [100 100 800 400]);
-plot(time_min, peakDepth_um, 'b.-', 'LineWidth', 1.4, 'MarkerSize', 10);
-xlabel('Time (min)', 'FontSize', 12);
-ylabel('Peak depth from cortex (\mum)', 'FontSize', 12);
-title('Wavefront depth vs time (band trajectory)', 'FontSize', 13);
-grid on;
-exportgraphics(fig4, fullfile(outDir, 'wave_peak_depth_vs_time.png'), 'Resolution', 200);
-savefig(fig4, fullfile(outDir, 'wave_peak_depth_vs_time.fig'));
-close(fig4);
+exportgraphics(fig, fullfile(outDir, 'carpet_per_angle.png'), 'Resolution', 200);
+savefig(fig, fullfile(outDir, 'carpet_per_angle.fig'));
+close(fig);
 
 %% ========================== SAVE DATA =====================================
 results = struct();
-results.maxInward_nm        = maxInward_nm;          % chosen-angle raw inward profile per frame
-results.anomalyInward_nm    = anomalyInward_nm;      % chosen-angle (slice - per-frame angular mean)
-results.avgInward_nm        = avgInward_nm;          % per-frame angular mean (the subtracted baseline)
-results.bestAngleIdx        = bestAngleIdx;
-results.bestAngle_rad       = bestAngle_rad;
-results.peakDepth_um        = peakDepth_um;
-results.peakValue_nm        = peakValue_nm;
+results.sliceCube           = sliceCube;             % full (angle x depth x frame) cube
+results.carpet              = carpet;                % carpet image (rows=angle*depth, cols=time)
 results.angleCenters_rad    = angleCenters;
 results.angleEdges_rad      = angleEdges;
 results.depthAxis_um        = depthAxis_um;
@@ -417,10 +379,12 @@ results.bit_depth           = bit_depth;
 results.nAngleBins          = nAngleBins;
 results.depthStep_um        = depthStep_um;
 results.maxDepth_um         = maxDepth_um;
-results.angleSmoothBins     = angleSmoothBins;
 results.thresholdMode       = thresholdMode;
 results.edgeMethod          = edgeMethod;
 results.inputMode           = inputMode;
+results.carpetAngleLabelEvery = carpetAngleLabelEvery;
+results.carpetSeparatorAlpha  = carpetSeparatorAlpha;
+results.carpetClimQuantiles   = carpetClimQuantiles;
 
 save(fullfile(outDir, 'wavefront_kymograph_results.mat'), '-struct', 'results');
 fprintf('Saved results to %s\n', fullfile(outDir, 'wavefront_kymograph_results.mat'));
