@@ -352,8 +352,8 @@ def main():
                         help='Half-length of director lines in pixels (default: 0.4*spacing)')
     parser.add_argument('--linewidth', '-lw', type=float, default=0.8,
                         help='Line width (default: 0.8)')
-    parser.add_argument('--px-per-um', type=float, default=6.25,
-                        help='Pixels per micron (default: 6.25)')
+    parser.add_argument('--px-per-um', type=float, default=3.125,
+                        help='Pixels per micron (default: 3.125)')
     parser.add_argument('--encoding', '-e', default='auto',
                         choices=['auto', 'openpolscope', 'uint16_180',
                                  'degrees', 'radians'],
