@@ -132,9 +132,10 @@ def segment_region(img_for_seg, sigma=20, close_r=25, min_area=5000,
 # ========================== DIRECTOR FIELD PLOT ===============================
 
 def plot_director_field(phi_deg, mask=None, retardance=None,
+                        raw_slow_axis=None,
                         spacing=15, line_length=None, px_per_um=3.125,
                         scale_by_ret=True, color_mode='orientation',
-                        background='retardance', linewidth=0.8,
+                        background='slow_axis', linewidth=0.8,
                         title=None, out_path=None, dpi=200,
                         fig_ax=None, scale_bar_um=50):
     """Plot nematic director field as headless line segments.
@@ -253,7 +254,9 @@ def plot_director_field(phi_deg, mask=None, retardance=None,
         fig, ax = fig_ax
 
     # --- Background ---
-    if background == 'retardance' and retardance is not None:
+    if background == 'slow_axis' and raw_slow_axis is not None:
+        ax.imshow(raw_slow_axis, cmap='gray', origin='upper', aspect='equal')
+    elif background == 'retardance' and retardance is not None:
         ax.imshow(retardance, cmap='gray', origin='upper', aspect='equal')
     elif background == 'orientation':
         hue_img = phi_deg / 180.0
@@ -414,9 +417,9 @@ def main():
     parser.add_argument('--color', '-c', default='orientation',
                         choices=['orientation', 'green_blue', 'retardance', 'white', 'black'],
                         help='Director color mode (default: orientation)')
-    parser.add_argument('--background', '-bg', default='none',
-                        choices=['retardance', 'orientation', 'mask', 'none'],
-                        help='Background image (default: none)')
+    parser.add_argument('--background', '-bg', default='slow_axis',
+                        choices=['slow_axis', 'retardance', 'orientation', 'mask', 'none'],
+                        help='Background image (default: slow_axis raw grayscale)')
     parser.add_argument('--output', '-o', default=None,
                         help='Output path (default: director_field.png in input dir)')
     parser.add_argument('--scale-bar', type=float, default=50,
@@ -499,6 +502,7 @@ def main():
         phi_deg,
         mask=mask,
         retardance=retardance,
+        raw_slow_axis=sa_img,
         spacing=args.spacing,
         line_length=args.line_length,
         px_per_um=args.px_per_um,
