@@ -290,57 +290,34 @@ def plot_director_field(phi_deg, mask=None, retardance=None,
             f'{bar_um} µm', color='white', ha='center', va='bottom',
             fontsize=9, fontweight='bold')
 
-    # --- Color legend (top-right) ---
-    if color_mode == 'green_blue':
+    # --- Orientation color legend (always shown, top-right) ---
+    if color_mode in ('green_blue', 'orientation'):
         ax_inset = fig.add_axes([0.78, 0.78, 0.15, 0.15], polar=True)
-        theta_wheel = np.linspace(0, np.pi, 181)
-        r_wheel = np.linspace(0.6, 1.0, 2)
-        Theta, R = np.meshgrid(theta_wheel, r_wheel)
-        t_norm = Theta / np.pi
-        green = np.array([0.0, 0.9, 0.2])
-        blue  = np.array([0.1, 0.4, 1.0])
-        C_rgb = np.zeros((*t_norm.shape, 3))
-        for ch in range(3):
-            C_rgb[:, :, ch] = (1 - t_norm) * green[ch] + t_norm * blue[ch]
-        ax_inset.pcolormesh(Theta, R, t_norm, color=C_rgb.reshape(-1, 3),
-                            shading='auto')
-        # Manual colored wedges since pcolormesh color= isn't supported
-        ax_inset.cla()
-        for i in range(180):
-            th0 = np.deg2rad(i)
-            th1 = np.deg2rad(i + 1)
-            t_val = i / 180.0
-            c = (1 - t_val) * green + t_val * blue
-            ax_inset.fill_between([th0, th1], 0.6, 1.0, color=c)
+        if color_mode == 'green_blue':
+            green = np.array([0.0, 0.9, 0.2])
+            blue  = np.array([0.1, 0.4, 1.0])
+            for i in range(180):
+                th0 = np.deg2rad(i)
+                th1 = np.deg2rad(i + 1)
+                t_val = i / 180.0
+                c = (1 - t_val) * green + t_val * blue
+                ax_inset.fill_between([th0, th1], 0.6, 1.0, color=c)
+        else:
+            theta_wheel = np.linspace(0, np.pi, 181)
+            r_wheel = np.linspace(0.6, 1.0, 2)
+            Theta, R = np.meshgrid(theta_wheel, r_wheel)
+            ax_inset.pcolormesh(Theta, R, Theta / np.pi,
+                                cmap=_orientation_cmap(), shading='auto')
         ax_inset.set_ylim(0, 1)
         ax_inset.set_theta_zero_location('E')
         ax_inset.set_theta_direction(1)
+        ax_inset.set_thetamin(0)
+        ax_inset.set_thetamax(180)
         ax_inset.set_xticks([0, np.pi/4, np.pi/2, 3*np.pi/4, np.pi])
         ax_inset.set_xticklabels(['0°', '45°', '90°', '135°', '180°'],
                                   fontsize=7, color='white')
         ax_inset.set_yticks([])
         ax_inset.set_facecolor('none')
-        for spine in ax_inset.spines.values():
-            spine.set_edgecolor('white')
-            spine.set_linewidth(0.5)
-        ax_inset.tick_params(colors='white', pad=2)
-    elif color_mode == 'orientation':
-        ax_inset = fig.add_axes([0.78, 0.78, 0.15, 0.15], polar=True)
-        theta_wheel = np.linspace(0, np.pi, 181)
-        r_wheel = np.linspace(0.6, 1.0, 2)
-        Theta, R = np.meshgrid(theta_wheel, r_wheel)
-        C_wheel = Theta / np.pi
-        ax_inset.pcolormesh(Theta, R, C_wheel,
-                            cmap=_orientation_cmap(), shading='auto')
-        ax_inset.set_ylim(0, 1)
-        ax_inset.set_theta_zero_location('E')
-        ax_inset.set_theta_direction(1)
-        ax_inset.set_xticks([0, np.pi/4, np.pi/2, 3*np.pi/4, np.pi])
-        ax_inset.set_xticklabels(['0°', '45°', '90°', '135°', '180°'],
-                                  fontsize=7, color='white')
-        ax_inset.set_yticks([])
-        ax_inset.set_facecolor('none')
-        ax_inset.spines['polar'].set_visible(False)
         for spine in ax_inset.spines.values():
             spine.set_edgecolor('white')
             spine.set_linewidth(0.5)
