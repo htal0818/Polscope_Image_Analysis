@@ -132,11 +132,11 @@ def segment_region(img_for_seg, sigma=20, close_r=25, min_area=5000,
 # ========================== DIRECTOR FIELD PLOT ===============================
 
 def plot_director_field(phi_deg, mask=None, retardance=None,
-                        spacing=15, line_length=None, px_per_um=6.25,
+                        spacing=15, line_length=None, px_per_um=3.125,
                         scale_by_ret=True, color_mode='orientation',
                         background='retardance', linewidth=0.8,
                         title=None, out_path=None, dpi=200,
-                        fig_ax=None):
+                        fig_ax=None, scale_bar_um=50):
     """Plot nematic director field as headless line segments.
 
     Parameters
@@ -231,6 +231,11 @@ def plot_director_field(phi_deg, mask=None, retardance=None,
         hue = phi_at_pts / 180.0
         hsv = np.column_stack([hue, np.ones_like(hue), np.ones_like(hue)])
         colors = mcolors.hsv_to_rgb(hsv)
+    elif color_mode == 'green_blue':
+        t = phi_at_pts / 180.0
+        green = np.array([0.0, 0.9, 0.2])
+        blue  = np.array([0.1, 0.4, 1.0])
+        colors = np.outer(1 - t, green) + np.outer(t, blue)
     elif color_mode == 'retardance' and retardance is not None:
         ret_at_pts = retardance[pts_y, pts_x].astype(float)
         ret_max = max(np.nanmax(ret_at_pts), 1e-10)
@@ -270,9 +275,9 @@ def plot_director_field(phi_deg, mask=None, retardance=None,
     lc = LineCollection(segments, colors=colors, linewidths=linewidth)
     ax.add_collection(lc)
 
-    # --- Scale bar (bottom-right, 10 um) ---
+    # --- Scale bar (bottom-right) ---
     um_per_px = 1.0 / px_per_um
-    bar_um = 10
+    bar_um = scale_bar_um
     bar_px = bar_um * px_per_um
     bar_y = H - 0.05 * H
     bar_x0 = W - 0.05 * W - bar_px
@@ -282,8 +287,41 @@ def plot_director_field(phi_deg, mask=None, retardance=None,
             f'{bar_um} µm', color='white', ha='center', va='bottom',
             fontsize=9, fontweight='bold')
 
-    # --- Orientation color legend (small wheel, top-right) ---
-    if color_mode == 'orientation':
+    # --- Color legend (top-right) ---
+    if color_mode == 'green_blue':
+        ax_inset = fig.add_axes([0.78, 0.78, 0.15, 0.15], polar=True)
+        theta_wheel = np.linspace(0, np.pi, 181)
+        r_wheel = np.linspace(0.6, 1.0, 2)
+        Theta, R = np.meshgrid(theta_wheel, r_wheel)
+        t_norm = Theta / np.pi
+        green = np.array([0.0, 0.9, 0.2])
+        blue  = np.array([0.1, 0.4, 1.0])
+        C_rgb = np.zeros((*t_norm.shape, 3))
+        for ch in range(3):
+            C_rgb[:, :, ch] = (1 - t_norm) * green[ch] + t_norm * blue[ch]
+        ax_inset.pcolormesh(Theta, R, t_norm, color=C_rgb.reshape(-1, 3),
+                            shading='auto')
+        # Manual colored wedges since pcolormesh color= isn't supported
+        ax_inset.cla()
+        for i in range(180):
+            th0 = np.deg2rad(i)
+            th1 = np.deg2rad(i + 1)
+            t_val = i / 180.0
+            c = (1 - t_val) * green + t_val * blue
+            ax_inset.fill_between([th0, th1], 0.6, 1.0, color=c)
+        ax_inset.set_ylim(0, 1)
+        ax_inset.set_theta_zero_location('E')
+        ax_inset.set_theta_direction(1)
+        ax_inset.set_xticks([0, np.pi/4, np.pi/2, 3*np.pi/4, np.pi])
+        ax_inset.set_xticklabels(['0°', '45°', '90°', '135°', '180°'],
+                                  fontsize=7, color='white')
+        ax_inset.set_yticks([])
+        ax_inset.set_facecolor('none')
+        for spine in ax_inset.spines.values():
+            spine.set_edgecolor('white')
+            spine.set_linewidth(0.5)
+        ax_inset.tick_params(colors='white', pad=2)
+    elif color_mode == 'orientation':
         ax_inset = fig.add_axes([0.78, 0.78, 0.15, 0.15], polar=True)
         theta_wheel = np.linspace(0, np.pi, 181)
         r_wheel = np.linspace(0.6, 1.0, 2)
@@ -374,13 +412,15 @@ def main():
     parser.add_argument('--no-scale', action='store_true',
                         help='Do not scale line length by retardance')
     parser.add_argument('--color', '-c', default='orientation',
-                        choices=['orientation', 'retardance', 'white', 'black'],
+                        choices=['orientation', 'green_blue', 'retardance', 'white', 'black'],
                         help='Director color mode (default: orientation)')
     parser.add_argument('--background', '-bg', default='none',
                         choices=['retardance', 'orientation', 'mask', 'none'],
                         help='Background image (default: none)')
     parser.add_argument('--output', '-o', default=None,
                         help='Output path (default: director_field.png in input dir)')
+    parser.add_argument('--scale-bar', type=float, default=50,
+                        help='Scale bar length in microns (default: 50)')
     parser.add_argument('--dpi', type=int, default=200)
     parser.add_argument('--title', default=None)
 
@@ -465,6 +505,7 @@ def main():
         title=args.title,
         out_path=out_path,
         dpi=args.dpi,
+        scale_bar_um=args.scale_bar,
     )
 
     n_pts = len(ax.collections[0].get_paths()) if ax.collections else 0
