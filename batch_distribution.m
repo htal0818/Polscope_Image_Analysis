@@ -55,6 +55,7 @@ opts.bit_depth             = 16;    % image bit depth (16-bit = 0..65535)
 opts.sigmaBlur             = 20;    % Gaussian blur sigma (px) for segmentation
 opts.closeRadius           = 25;    % morphological close disk radius (px)
 opts.minArea               = 5000;  % minimum object area (px^2) to reject debris
+opts.boundaryInset_px      = 10;    % shift boundary inward onto cortex
 opts.thresholdMode         = 'otsu';
 opts.fixedThreshold        = 500;
 opts.percentileThreshold   = 30;
@@ -62,10 +63,6 @@ opts.adaptiveSensitivity   = 0.5;  % for 'adaptive' mode (0-1, higher = more for
 
 % --- Spatial calibration ---
 px_per_um = 6.25;             % pixels per micron (adjust for your objective)
-
-% --- Cortical inset depth ---
-boundaryInset_um           = 2.5;   % cortical depth (um), typically 2-3 um
-opts.boundaryInset_px      = round(boundaryInset_um * px_per_um);
 
 % --- Histogram parameters ---
 nBins       = 100;            % number of histogram bins
