@@ -458,6 +458,10 @@ def main():
         if retardance.ndim == 3:
             retardance = np.mean(retardance, axis=2)
         retardance = retardance.astype(float)
+        if retardance.shape != (H, W):
+            from skimage.transform import resize
+            print(f'Retardance image {retardance.shape} != slow axis {(H,W)}, resizing...')
+            retardance = resize(retardance, (H, W), preserve_range=True)
         print(f'Retardance image: {retardance.shape}, range=[{retardance.min():.1f}, {retardance.max():.1f}]')
 
     # --- Build mask ---
