@@ -315,13 +315,13 @@ def plot_director_field(phi_deg, mask=None, retardance=None,
         ax_inset.set_thetamax(180)
         ax_inset.set_xticks([0, np.pi/4, np.pi/2, 3*np.pi/4, np.pi])
         ax_inset.set_xticklabels(['0°', '45°', '90°', '135°', '180°'],
-                                  fontsize=7, color='white')
+                                  fontsize=9, fontweight='bold', color='red')
         ax_inset.set_yticks([])
         ax_inset.set_facecolor('none')
         for spine in ax_inset.spines.values():
             spine.set_edgecolor('white')
             spine.set_linewidth(0.5)
-        ax_inset.tick_params(colors='white', pad=2)
+        ax_inset.tick_params(colors='red', pad=2)
 
     ax.set_xlim(0, W)
     ax.set_ylim(H, 0)
