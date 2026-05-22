@@ -596,14 +596,63 @@ def plot_all(phi_deg, phi_rad, weight, mask, raw_img,
 
 # ========================== MAIN ==============================================
 
+def discover_files(base_dir, sa_pattern='*Slow Axis Orientation*',
+                   ret_pattern='*Retardance*',
+                   state_patterns=None):
+    """Auto-discover slow-axis, retardance, and state images in a directory.
+
+    Mirrors the contour_retardance.m file enumeration: sorted by filename.
+    """
+    base = Path(base_dir)
+    if not base.is_dir():
+        raise FileNotFoundError(f'Directory not found: {base_dir}')
+
+    sa_files = sorted(glob.glob(str(base / sa_pattern)))
+    ret_files = sorted(glob.glob(str(base / ret_pattern)))
+
+    if state_patterns is None:
+        state_patterns = ['*State1*', '*State2*', '*State3*', '*State4*']
+    state_files = []
+    for pat in state_patterns:
+        found = sorted(glob.glob(str(base / pat)))
+        if found:
+            state_files.append(found)
+
+    has_states = len(state_files) == 4 and all(len(s) > 0 for s in state_files)
+
+    print(f'Base directory: {base_dir}')
+    print(f'  Slow-axis files:  {len(sa_files)}')
+    print(f'  Retardance files: {len(ret_files)}')
+    if has_states:
+        print(f'  State image sets:  {len(state_files[0])} (x4 states)')
+    else:
+        print(f'  State images:     not found (will segment from SA or retardance)')
+
+    return sa_files, ret_files, state_files if has_states else None
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Nematic order parameter analysis from Polscope slow-axis images.',
         formatter_class=argparse.RawDescriptionHelpFormatter)
 
-    parser.add_argument('slow_axis', help='Path to slow-axis orientation TIFF')
+    input_group = parser.add_mutually_exclusive_group(required=True)
+    input_group.add_argument('--base-dir', '-d', default=None,
+                             help='Directory containing Polscope images. '
+                                  'Auto-discovers slow-axis orientation files '
+                                  'matching *Slow Axis Orientation* and '
+                                  'optionally State1-4 for segmentation.')
+    input_group.add_argument('--slow-axis', default=None,
+                             help='Path to a single slow-axis orientation TIFF')
+
+    parser.add_argument('--sa-pattern', default='*Slow Axis Orientation*',
+                        help='Glob pattern for slow-axis files '
+                             '(default: "*Slow Axis Orientation*")')
+    parser.add_argument('--ret-pattern', default='*Retardance*',
+                        help='Glob pattern for retardance files '
+                             '(default: "*Retardance*")')
     parser.add_argument('--retardance', '-r', default=None,
-                        help='Retardance image (for segmentation and weighting)')
+                        help='Single retardance image (when using --slow-axis)')
     parser.add_argument('--encoding', '-e', default='auto',
                         choices=['auto', 'openpolscope', 'uint16_180',
                                  'degrees', 'radians'])
@@ -611,7 +660,7 @@ def main():
     seg_group = parser.add_mutually_exclusive_group()
     seg_group.add_argument('--state-dir', default=None,
                            help='Directory with State1-4 images for segmentation '
-                                '(contour_retardance.m four_state mode)')
+                                '(overrides auto-discovery from --base-dir)')
     seg_group.add_argument('--segment-from-sa', action='store_true',
                            help='Segment from the slow-axis image itself')
     seg_group.add_argument('--mask', default=None,
@@ -627,13 +676,34 @@ def main():
                         help='Angular bins around cortex (default: 100)')
     parser.add_argument('--director-spacing', type=int, default=40,
                         help='Grid spacing for director overlay (default: 40)')
+    parser.add_argument('--frame', type=int, default=0,
+                        help='Frame index to analyze (default: 0, first frame)')
     parser.add_argument('--output', '-o', default=None,
                         help='Output directory (default: nematic_analysis_out/)')
 
     args = parser.parse_args()
 
+    # --- Resolve input files ---
+    if args.base_dir:
+        sa_files, ret_files, state_file_sets = discover_files(
+            args.base_dir, args.sa_pattern, args.ret_pattern)
+        if not sa_files:
+            print(f'ERROR: No slow-axis files matching "{args.sa_pattern}" '
+                  f'in {args.base_dir}')
+            sys.exit(1)
+        idx = min(args.frame, len(sa_files) - 1)
+        sa_path = sa_files[idx]
+        ret_path = ret_files[idx] if idx < len(ret_files) else None
+        print(f'\nAnalyzing frame {idx}: {Path(sa_path).name}')
+        if ret_path:
+            print(f'  Retardance: {Path(ret_path).name}')
+    else:
+        sa_path = args.slow_axis
+        ret_path = args.retardance
+        state_file_sets = None
+
     # --- Load slow-axis ---
-    sa_img = io.imread(args.slow_axis)
+    sa_img = io.imread(sa_path)
     if sa_img.ndim == 3:
         sa_img = sa_img[:, :, 0]
     H, W = sa_img.shape
@@ -657,8 +727,8 @@ def main():
 
     # --- Load retardance (optional, for weighting) ---
     retardance = None
-    if args.retardance:
-        retardance = io.imread(args.retardance)
+    if ret_path:
+        retardance = io.imread(ret_path)
         if retardance.ndim == 3:
             retardance = np.mean(retardance, axis=2)
         retardance = retardance.astype(float)
@@ -676,8 +746,12 @@ def main():
 
     # --- Segmentation ---
     print('Segmenting...')
-    if args.state_dir:
-        mask = segment_from_states(args.state_dir)
+    state_dir = args.state_dir
+    if not state_dir and args.base_dir and state_file_sets:
+        state_dir = args.base_dir
+
+    if state_dir and not args.segment_from_sa and not args.mask and not args.roi:
+        mask = segment_from_states(state_dir)
         if mask.shape != (H, W):
             from skimage.transform import resize
             print(f'Resizing state mask {mask.shape} → {(H,W)}')
@@ -732,8 +806,12 @@ def main():
     # --- Generate all plots ---
     out_dir = args.output
     if out_dir is None:
-        out_dir = Path(args.slow_axis).parent / 'nematic_analysis_out'
-    print(f'\nGenerating plots → {out_dir}/')
+        if args.base_dir:
+            out_dir = Path(args.base_dir) / 'nematic_analysis_out'
+        else:
+            out_dir = Path(sa_path).parent / 'nematic_analysis_out'
+    print(f'\nInput:  {sa_path}')
+    print(f'Output: {out_dir}/')
 
     plot_all(phi_deg, phi_rad, weight, mask, raw_img,
              xb, yb, center, R_fit,
