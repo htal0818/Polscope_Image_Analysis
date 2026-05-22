@@ -13,14 +13,17 @@ Segmentation follows the existing contour_retardance.m pipeline:
   - Mask is mapped onto the slow-axis orientation image
 
 Usage:
-  # With state images for segmentation (recommended):
-  python nematic_analysis.py <slow_axis.tif> --state-dir /path/to/data/
+  # Just give it your data folder (like base_dir in the MATLAB scripts):
+  python nematic_analysis.py /path/to/Pos0/
 
-  # With a retardance image for segmentation:
-  python nematic_analysis.py <slow_axis.tif> --retardance ret.tif
+  # Or give it a single slow-axis TIFF:
+  python nematic_analysis.py /path/to/slow_axis.tif
 
-  # Segment from the slow-axis image itself:
-  python nematic_analysis.py <slow_axis.tif> --segment-from-sa
+  # With a retardance image for segmentation + weighting:
+  python nematic_analysis.py /path/to/Pos0/ --retardance ret.tif
+
+  # Segment from the slow-axis image itself (no state images):
+  python nematic_analysis.py /path/to/slow_axis.tif --segment-from-sa
 """
 
 import sys
@@ -636,14 +639,14 @@ def main():
         description='Nematic order parameter analysis from Polscope slow-axis images.',
         formatter_class=argparse.RawDescriptionHelpFormatter)
 
-    input_group = parser.add_mutually_exclusive_group(required=True)
-    input_group.add_argument('--base-dir', '-d', default=None,
-                             help='Directory containing Polscope images. '
-                                  'Auto-discovers slow-axis orientation files '
-                                  'matching *Slow Axis Orientation* and '
-                                  'optionally State1-4 for segmentation.')
-    input_group.add_argument('--slow-axis', default=None,
-                             help='Path to a single slow-axis orientation TIFF')
+    parser.add_argument('path', nargs='?', default=None,
+                        help='Path to a directory or a single slow-axis TIFF. '
+                             'Directories are scanned for *Slow Axis Orientation*, '
+                             '*Retardance*, and *State1-4* files automatically.')
+    parser.add_argument('--base-dir', '-d', default=None,
+                        help='(Alias for path) Directory containing Polscope images.')
+    parser.add_argument('--slow-axis', default=None,
+                        help='(Alias for path) Single slow-axis orientation TIFF.')
 
     parser.add_argument('--sa-pattern', default='*Slow Axis Orientation*',
                         help='Glob pattern for slow-axis files '
@@ -683,13 +686,21 @@ def main():
 
     args = parser.parse_args()
 
-    # --- Resolve input files ---
-    if args.base_dir:
+    # --- Resolve input: positional path, --base-dir, or --slow-axis ---
+    input_path = args.path or args.base_dir or args.slow_axis
+    if input_path is None:
+        parser.error('Provide a path: either a directory or a slow-axis TIFF.\n'
+                     '  nematic_analysis.py /path/to/Pos0/\n'
+                     '  nematic_analysis.py /path/to/slow_axis.tif')
+
+    input_path = Path(input_path)
+
+    if input_path.is_dir():
         sa_files, ret_files, state_file_sets = discover_files(
-            args.base_dir, args.sa_pattern, args.ret_pattern)
+            str(input_path), args.sa_pattern, args.ret_pattern)
         if not sa_files:
             print(f'ERROR: No slow-axis files matching "{args.sa_pattern}" '
-                  f'in {args.base_dir}')
+                  f'in {input_path}')
             sys.exit(1)
         idx = min(args.frame, len(sa_files) - 1)
         sa_path = sa_files[idx]
@@ -697,10 +708,12 @@ def main():
         print(f'\nAnalyzing frame {idx}: {Path(sa_path).name}')
         if ret_path:
             print(f'  Retardance: {Path(ret_path).name}')
-    else:
-        sa_path = args.slow_axis
+    elif input_path.is_file():
+        sa_path = str(input_path)
         ret_path = args.retardance
         state_file_sets = None
+    else:
+        parser.error(f'Path not found: {input_path}')
 
     # --- Load slow-axis ---
     sa_img = io.imread(sa_path)
@@ -806,10 +819,10 @@ def main():
     # --- Generate all plots ---
     out_dir = args.output
     if out_dir is None:
-        if args.base_dir:
-            out_dir = Path(args.base_dir) / 'nematic_analysis_out'
+        if input_path.is_dir():
+            out_dir = input_path / 'nematic_analysis_out'
         else:
-            out_dir = Path(sa_path).parent / 'nematic_analysis_out'
+            out_dir = input_path.parent / 'nematic_analysis_out'
     print(f'\nInput:  {sa_path}')
     print(f'Output: {out_dir}/')
 
