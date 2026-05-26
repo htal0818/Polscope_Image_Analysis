@@ -704,6 +704,9 @@ def main():
                         help=f'Grid spacing for director overlay (default: {DEFAULT_DIRECTOR_SPACING})')
     parser.add_argument('--dt', type=float, default=DEFAULT_DT_SEC,
                         help=f'Seconds per frame for time axis (default: {DEFAULT_DT_SEC})')
+    parser.add_argument('--bg-subtract', action='store_true',
+                        help='Subtract background from raw slow-axis pixel values '
+                             '(median of outside-mask or image corners)')
     parser.add_argument('--frame', type=int, default=None,
                         help='Analyze only this frame index (default: all frames)')
     parser.add_argument('--output', '-o', default=None,
@@ -780,6 +783,7 @@ def main():
     sigma_px = args.sigma_um * args.px_per_um
     dt_sec = args.dt
     n_theta_bins = args.n_theta_bins
+    bg_subtract = args.bg_subtract
 
     # --- Timing ---
     time_sec = np.arange(nFrames) * dt_sec
@@ -817,7 +821,25 @@ def main():
         sa_img = io.imread(sa_files[fr])
         if sa_img.ndim == 3:
             sa_img = sa_img[:, :, 0]
-        phi_deg = np.mod(sa_img.astype(float) * scale, 180.0)
+
+        # --- Background subtraction on raw slow-axis pixel values ---
+        sa_float = sa_img.astype(float)
+        if bg_subtract:
+            if fr > 0 and mask is not None and np.any(~mask):
+                bg_val = np.median(sa_float[~mask])
+            else:
+                # Use corners (top-left and bottom-right 5% strips)
+                h5, w5 = max(1, H // 20), max(1, W // 20)
+                corners = np.concatenate([sa_float[:h5, :].ravel(),
+                                          sa_float[-h5:, :].ravel(),
+                                          sa_float[:, :w5].ravel(),
+                                          sa_float[:, -w5:].ravel()])
+                bg_val = np.median(corners)
+            sa_float = sa_float - bg_val
+            if fr == 0:
+                print(f'  BG subtracted: {bg_val:.1f} (raw pixel units)')
+
+        phi_deg = np.mod(sa_float * scale, 180.0)
         phi_rad = np.deg2rad(phi_deg)
 
         # --- Load retardance ---
