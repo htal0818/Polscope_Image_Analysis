@@ -629,14 +629,17 @@ def discover_files(base_dir, sa_pattern='*Slow Axis Orientation*',
     if not base.is_dir():
         raise FileNotFoundError(f'Directory not found: {base_dir}')
 
-    sa_files = sorted(glob.glob(str(base / sa_pattern)))
-    ret_files = sorted(glob.glob(str(base / ret_pattern)))
+    sa_files = sorted([f for f in glob.glob(str(base / sa_pattern))
+                       if f.lower().endswith(('.tif', '.tiff', '.png', '.jpg'))])
+    ret_files = sorted([f for f in glob.glob(str(base / ret_pattern))
+                        if f.lower().endswith(('.tif', '.tiff', '.png', '.jpg'))])
 
     if state_patterns is None:
         state_patterns = ['*State1*', '*State2*', '*State3*', '*State4*']
     state_files = []
     for pat in state_patterns:
-        found = sorted(glob.glob(str(base / pat)))
+        found = sorted([f for f in glob.glob(str(base / pat))
+                        if f.lower().endswith(('.tif', '.tiff', '.png', '.jpg'))])
         if found:
             state_files.append(found)
 
