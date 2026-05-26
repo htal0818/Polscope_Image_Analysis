@@ -233,25 +233,51 @@ def nematic_order_global(phi_rad, weight, mask):
 # ========================== TANGENTIAL / RADIAL ===============================
 
 def tangential_radial_alignment(phi_rad, mask, xc, yc):
-    """Angle between director and local tangent to the oocyte boundary.
+    """Angle between director and local boundary normal at each pixel.
 
-    At each pixel, the radial direction is the vector from (xc,yc) to (x,y).
-    The tangent is perpendicular to that. We compute:
-      alpha = phi - theta_radial   (mod pi, folded to [0, pi/2])
-    where alpha=0 means radial, alpha=pi/2 means tangential.
+    Uses the gradient of the Euclidean distance transform to define the
+    local normal direction — this follows the true boundary curvature,
+    not a circle approximation. Same approach as contour_retardance.m
+    (lines ~494-505) where analytic normals come from the distance field.
+
+    At each pixel inside the mask:
+      normal_angle = atan2(∂D/∂y, ∂D/∂x)   (D = distance from cortex)
+      alpha = |phi - normal_angle|  mod pi, folded to [0, pi/2]
+
+    alpha = 0    → director is radial (along local normal, into cortex)
+    alpha = pi/2 → director is tangential (along local contour)
 
     Returns
     -------
     alpha : 2D array (radians), 0=radial, pi/2=tangential, NaN outside mask
     """
     H, W = mask.shape
-    yy, xx = np.mgrid[0:H, 0:W]
-    theta_radial = np.arctan2(yy - yc, xx - xc)  # radial direction at each pixel
 
-    # Angle difference, folded to [0, pi/2] (nematic: no head/tail distinction)
-    diff = phi_rad - theta_radial
+    # Distance transform from the cortex perimeter
+    perim = morphology.erosion(mask, morphology.disk(1)) ^ mask
+    D = distance_transform_edt(~perim)
+
+    # Gradient of distance field = local normal direction
+    # Use Sobel for smoother gradient estimate
+    Gy, Gx = np.gradient(D)
+
+    # Normal angle at each pixel (points away from nearest boundary)
+    normal_angle = np.arctan2(Gy, Gx)
+
+    # Ensure normals point inward (toward center)
+    yy, xx = np.mgrid[0:H, 0:W]
+    to_center_x = xc - xx
+    to_center_y = yc - yy
+    dot = Gx * to_center_x + Gy * to_center_y
+    # Flip normal where it points away from center
+    flip = dot < 0
+    normal_angle[flip] = normal_angle[flip] + np.pi
+
+    # Angle between director and local normal
+    # Folded to [0, pi/2] because of nematic symmetry
+    diff = phi_rad - normal_angle
     diff = np.mod(diff, np.pi)
-    alpha = np.minimum(diff, np.pi - diff)  # fold to [0, pi/2]
+    alpha = np.minimum(diff, np.pi - diff)
 
     alpha[~mask] = np.nan
     return alpha
