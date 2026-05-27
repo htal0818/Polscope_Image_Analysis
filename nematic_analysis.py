@@ -2,9 +2,14 @@
 """
 nematic_analysis.py — Nematic order parameter analysis from LC-PolScope images.
 
-Computes the 2D nematic order parameter S, tangential/radial alignment,
-orientation histograms, and spatial heatmaps from Polscope slow-axis
-orientation images.
+Computes the 2D nematic Q tensor and scalar order parameter S following
+Mirza et al. (eLife 2024, arXiv:2306.15352), plus tangential/radial
+alignment, orientation histograms, and spatial heatmaps from Polscope
+slow-axis orientation images.
+
+The 2D nematic Q tensor is Q_ij = S(n_i n_j - delta_ij/2), with
+independent components q1 = <cos(2 phi)>_w / 2 and q2 = <sin(2 phi)>_w / 2.
+The scalar order parameter is S = sqrt(2 Q_ij Q_ij) = 2 sqrt(q1^2 + q2^2).
 
 Segmentation follows the existing contour_retardance.m pipeline:
   - State images 1-4 are summed for high-contrast segmentation
@@ -179,10 +184,18 @@ def find_boundary_and_center(BW):
 # ========================== NEMATIC ORDER PARAMETER ===========================
 
 def nematic_order_map(phi_rad, weight, mask, sigma_px=31):
-    """Local 2D nematic order parameter via retardance-weighted Gaussian averaging.
+    """Local 2D nematic order parameter via Q-tensor averaging.
 
-    S(x) = |<w * exp(2i*phi)>_G| / <w>_G
-         = sqrt(<w*cos2phi>_G^2 + <w*sin2phi>_G^2) / <w>_G
+    Following Mirza et al. (eLife 2024, arXiv:2306.15352), the 2D nematic
+    Q tensor is Q_ij = S (n_i n_j - delta_ij / 2) with independent components:
+        q1 = Q_11 = -Q_22 = <cos(2 phi)>_w / 2
+        q2 = Q_12 =  Q_21 = <sin(2 phi)>_w / 2
+    where <>_w denotes retardance-weighted Gaussian spatial averaging.
+
+    The scalar order parameter is:
+        S = sqrt(2 Q_ij Q_ij) = 2 sqrt(q1^2 + q2^2)
+    and the mean director angle is:
+        psi = (1/2) arctan2(q2, q1)
 
     Parameters
     ----------
@@ -193,8 +206,10 @@ def nematic_order_map(phi_rad, weight, mask, sigma_px=31):
 
     Returns
     -------
-    S   : 2D array, scalar order parameter [0,1], NaN outside mask
-    psi : 2D array, local mean director (rad), NaN outside mask
+    S   : 2D array, scalar order parameter [0, 1], NaN outside mask
+    psi : 2D array, local mean director angle (rad), NaN outside mask
+    q1  : 2D array, Q-tensor component Q_11, NaN outside mask
+    q2  : 2D array, Q-tensor component Q_12, NaN outside mask
     """
     C = np.cos(2 * phi_rad)
     Sm = np.sin(2 * phi_rad)
@@ -205,29 +220,47 @@ def nematic_order_map(phi_rad, weight, mask, sigma_px=31):
     num_S = gaussian_filter(w * Sm, sigma_px)
     den_W = gaussian_filter(w, sigma_px)
 
-    Qxx = num_C / np.maximum(den_W, 1e-10)
-    Qxy = num_S / np.maximum(den_W, 1e-10)
-    S = np.sqrt(Qxx**2 + Qxy**2)
-    psi = 0.5 * np.arctan2(Qxy, Qxx)
+    avg_cos2phi = num_C / np.maximum(den_W, 1e-10)
+    avg_sin2phi = num_S / np.maximum(den_W, 1e-10)
+
+    q1 = avg_cos2phi / 2.0
+    q2 = avg_sin2phi / 2.0
+
+    S = 2.0 * np.sqrt(q1**2 + q2**2)
+    psi = 0.5 * np.arctan2(q2, q1)
 
     S[~mask] = np.nan
     psi[~mask] = np.nan
-    return S, psi
+    q1[~mask] = np.nan
+    q2[~mask] = np.nan
+    return S, psi, q1, q2
 
 
 def nematic_order_global(phi_rad, weight, mask):
-    """Whole-mask scalar order parameter. Returns (S, psi)."""
+    """Whole-mask scalar order parameter via Q-tensor averaging.
+
+    Computes the retardance-weighted average of the nematic Q tensor
+    over the entire mask following Mirza et al. (eLife 2024):
+        q1 = <cos(2 phi)>_w / 2,  q2 = <sin(2 phi)>_w / 2
+        S = 2 sqrt(q1^2 + q2^2),  psi = (1/2) arctan2(q2, q1)
+
+    Returns (S, psi, q1, q2).
+    """
     w = weight[mask]
     C = np.cos(2 * phi_rad[mask])
     Sm = np.sin(2 * phi_rad[mask])
     W_tot = np.sum(w)
     if W_tot <= 0:
-        return np.nan, np.nan
-    Qxx = np.sum(w * C) / W_tot
-    Qxy = np.sum(w * Sm) / W_tot
-    S = np.hypot(Qxx, Qxy)
-    psi = 0.5 * np.arctan2(Qxy, Qxx)
-    return S, psi
+        return np.nan, np.nan, np.nan, np.nan
+    avg_cos2phi = np.sum(w * C) / W_tot
+    avg_sin2phi = np.sum(w * Sm) / W_tot
+
+    q1 = avg_cos2phi / 2.0
+    q2 = avg_sin2phi / 2.0
+
+    S = 2.0 * np.hypot(q1, q2)
+    psi = 0.5 * np.arctan2(q2, q1)
+    return S, psi, q1, q2
 
 
 # ========================== TANGENTIAL / RADIAL ===============================
@@ -290,7 +323,12 @@ def cortex_nematic_profile(phi_rad, weight, xb, yb, xc, yc,
     """Theta-binned nematic order S(theta) around the cortex.
 
     Samples cos(2phi), sin(2phi), and weight at boundary points, bins by
-    angular position theta around center, computes S per bin.
+    angular position theta around center, computes Q-tensor components and
+    S per bin following Mirza et al. (eLife 2024):
+        q1 = <cos(2 phi)>_w / 2,  q2 = <sin(2 phi)>_w / 2
+        S = 2 sqrt(q1^2 + q2^2)
+
+    Returns (S_theta, psi_theta, theta_centers_deg, q1_theta, q2_theta).
     """
     H, W = phi_rad.shape
 
@@ -331,6 +369,8 @@ def cortex_nematic_profile(phi_rad, weight, xb, yb, xc, yc,
 
     S_theta = np.full(n_theta_bins, np.nan)
     psi_theta = np.full(n_theta_bins, np.nan)
+    q1_theta = np.full(n_theta_bins, np.nan)
+    q2_theta = np.full(n_theta_bins, np.nan)
 
     for b in range(n_theta_bins):
         m = bins == b
@@ -339,12 +379,15 @@ def cortex_nematic_profile(phi_rad, weight, xb, yb, xc, yc,
         w_sum = np.sum(wvals[m])
         if w_sum <= 0:
             continue
-        qxx = np.sum(wvals[m] * cvals[m]) / w_sum
-        qxy = np.sum(wvals[m] * svals[m]) / w_sum
-        S_theta[b] = np.hypot(qxx, qxy)
-        psi_theta[b] = 0.5 * np.arctan2(qxy, qxx)
+        avg_cos2phi = np.sum(wvals[m] * cvals[m]) / w_sum
+        avg_sin2phi = np.sum(wvals[m] * svals[m]) / w_sum
 
-    return S_theta, psi_theta, np.rad2deg(theta_centers)
+        q1_theta[b] = avg_cos2phi / 2.0
+        q2_theta[b] = avg_sin2phi / 2.0
+        S_theta[b] = 2.0 * np.hypot(q1_theta[b], q2_theta[b])
+        psi_theta[b] = 0.5 * np.arctan2(q2_theta[b], q1_theta[b])
+
+    return S_theta, psi_theta, np.rad2deg(theta_centers), q1_theta, q2_theta
 
 
 # ========================== PLOTTING ==========================================
@@ -354,7 +397,10 @@ def plot_all(phi_deg, phi_rad, weight, mask, raw_img,
              S_map, psi_map, S_global, psi_global,
              alpha_map, S_theta, psi_theta, theta_centers_deg,
              out_dir, px_per_um=3.125, sigma_um=5.0,
-             director_spacing=40):
+             director_spacing=40,
+             q1_map=None, q2_map=None,
+             q1_global=None, q2_global=None,
+             q1_theta=None, q2_theta=None):
     """Generate all analysis plots."""
     H, W = phi_deg.shape
     out_dir = Path(out_dir)
@@ -615,6 +661,8 @@ def plot_all(phi_deg, phi_rad, weight, mask, raw_img,
     summary = {
         'S_global': S_global,
         'psi_global_deg': np.rad2deg(psi_global) % 180,
+        'q1_global': q1_global,
+        'q2_global': q2_global,
         'mean_alignment_angle_deg': alpha_mean,
         'median_alignment_angle_deg': alpha_med,
         'circular_mean_orientation_deg': phi_mean_circ,
@@ -635,8 +683,10 @@ def plot_all(phi_deg, phi_rad, weight, mask, raw_img,
 
     np.savez(out_dir / 'nematic_results.npz',
              S_map=S_map, psi_map=psi_map,
+             q1_map=q1_map, q2_map=q2_map,
              alpha_map=alpha_map,
              S_theta=S_theta, psi_theta=psi_theta,
+             q1_theta=q1_theta, q2_theta=q2_theta,
              theta_centers_deg=theta_centers_deg,
              **summary)
     print(f'  Saved: nematic_results.npz')
@@ -819,9 +869,13 @@ def main():
     # --- Preallocate time-series arrays ---
     S_global_ts       = np.full(nFrames, np.nan)
     psi_global_ts      = np.full(nFrames, np.nan)
+    q1_global_ts       = np.full(nFrames, np.nan)
+    q2_global_ts       = np.full(nFrames, np.nan)
     align_mean_ts      = np.full(nFrames, np.nan)
     S_kymo             = np.full((nFrames, n_theta_bins), np.nan)
     psi_kymo           = np.full((nFrames, n_theta_bins), np.nan)
+    q1_kymo            = np.full((nFrames, n_theta_bins), np.nan)
+    q2_kymo            = np.full((nFrames, n_theta_bins), np.nan)
 
     # Example frames for spatial overlays (first, middle, last)
     example_frames = sorted(set([0, nFrames // 2, nFrames - 1]))
@@ -930,20 +984,24 @@ def main():
         xc, yc = center
 
         # --- Compute per-frame quantities ---
-        S_map, psi_map = nematic_order_map(phi_rad, weight, mask, sigma_px)
-        S_g, psi_g = nematic_order_global(phi_rad, weight, mask)
+        S_map, psi_map, q1_map, q2_map = nematic_order_map(phi_rad, weight, mask, sigma_px)
+        S_g, psi_g, q1_g, q2_g = nematic_order_global(phi_rad, weight, mask)
         alpha_map = tangential_radial_alignment(phi_rad, mask, xc, yc)
 
-        S_theta, psi_theta, _ = cortex_nematic_profile(
+        S_theta, psi_theta, _, q1_theta, q2_theta = cortex_nematic_profile(
             phi_rad, weight, xb, yb, xc, yc, n_theta_bins=n_theta_bins)
 
         # --- Store ---
         S_global_ts[fr] = S_g
         psi_global_ts[fr] = psi_g
+        q1_global_ts[fr] = q1_g
+        q2_global_ts[fr] = q2_g
         alpha_valid = alpha_map[mask & ~np.isnan(alpha_map)]
         align_mean_ts[fr] = np.rad2deg(np.nanmean(alpha_valid)) if len(alpha_valid) > 0 else np.nan
         S_kymo[fr, :] = S_theta
         psi_kymo[fr, :] = psi_theta
+        q1_kymo[fr, :] = q1_theta
+        q2_kymo[fr, :] = q2_theta
 
         # --- Save spatial overlays for example frames ---
         if fr in example_frames:
@@ -954,7 +1012,10 @@ def main():
                      alpha_map, S_theta, psi_theta, theta_centers_deg,
                      out_dir / f'frame_{fr:04d}',
                      px_per_um=args.px_per_um, sigma_um=args.sigma_um,
-                     director_spacing=args.director_spacing)
+                     director_spacing=args.director_spacing,
+                     q1_map=q1_map, q2_map=q2_map,
+                     q1_global=q1_g, q2_global=q2_g,
+                     q1_theta=q1_theta, q2_theta=q2_theta)
 
         # --- Progress ---
         if fr % 25 == 0 or fr == nFrames - 1:
@@ -1025,9 +1086,13 @@ def main():
     np.savez(out_dir / 'nematic_results.npz',
              S_global_ts=S_global_ts,
              psi_global_ts=psi_global_ts,
+             q1_global_ts=q1_global_ts,
+             q2_global_ts=q2_global_ts,
              align_mean_ts=align_mean_ts,
              S_kymo=S_kymo,
              psi_kymo=psi_kymo,
+             q1_kymo=q1_kymo,
+             q2_kymo=q2_kymo,
              theta_centers_deg=theta_centers_deg,
              time_sec=time_sec,
              time_min=time_min,
