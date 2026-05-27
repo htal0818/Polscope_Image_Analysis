@@ -5,6 +5,9 @@ contour_retardance_out/
 # Test images
 test_oocyte.png
 
+# Python bytecache
+__pycache__/
+
 # MATLAB/Octave artifacts
 *.asv
 *.m~
