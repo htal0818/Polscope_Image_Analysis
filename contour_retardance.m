@@ -611,7 +611,7 @@ for fr = 1:nFrames
 
     row = nan(1, nThetaBins);
     if any(valid)
-        row = accumarray(bin(valid), peakRetardance(valid)', [nThetaBins 1], @nanmean, NaN)';
+        row = accumarray(bin(valid).', peakRetardance(valid).', [nThetaBins 1], @nanmean, NaN).';
     end
 
     % Fill missing bins via circular interpolation
