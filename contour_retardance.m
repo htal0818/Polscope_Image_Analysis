@@ -122,6 +122,18 @@ forceThresholdEveryN = 0;      % >0: re-seed from threshold every N frames
 maxAreaChangeFrac    = 0.08;   % reject if |area_now - area_prev|/area_prev > this
 maxCenterJump_px     = 40;     % reject if centroid moves more than this many pixels
 
+% --- Background subtraction (applied to retardance Iret, per frame) ---
+% Samples four corner boxes of Iret each frame; takes the dimmest corner
+% mean as the BG estimate and subtracts it. Removes slowly-drifting
+% baseline (camera offset, optical leakage) from cortex / cytoplasm /
+% kymograph nm values. Iseg (segmentation source) is left untouched so
+% the snake still sees the original gradient field.
+useBGSubtract        = true;
+bgCornerSize_px      = 100;    % side length (px) of each corner sample box
+bgWarnFracOfMax      = 0.3;    % warn if min corner mean > this * max(Iret)
+                               %   (suggests oocyte is covering all corners)
+bgFloorAtZero        = true;   % clip Iret >= 0 after subtraction
+
 % --- Angular binning for kymograph ---
 nThetaBins = 100;      % number of angular bins around contour
 
@@ -289,6 +301,9 @@ nMaskRejected    = 0;           % diagnostic: frames reverted to previous good
 
 rejectedFrames   = false(nFrames, 1);   % logical mask of rejected frames
 
+% --- Background subtraction state ---
+bgValues_nm      = nan(nFrames, 1);     % per-frame BG estimate from corner sampling
+
 %% ========================== MAIN LOOP =====================================
 fprintf('Processing %d frames...\n', nFrames);
 tic;
@@ -305,12 +320,42 @@ for fr = 1:nFrames
     % Convert raw pixel values to retardance in nm
     Iret = (Iraw / maxPixVal) * retardance_ceiling_nm;
 
+    % Per-frame BG subtraction (dimmest corner box of Iret)
+    if useBGSubtract
+        s = min(bgCornerSize_px, floor(min(H, W) / 4));
+        cornerMeans = [ ...
+            mean(Iret(1:s,         1:s),         'all', 'omitnan'), ...    % top-left
+            mean(Iret(1:s,         end-s+1:end), 'all', 'omitnan'), ...    % top-right
+            mean(Iret(end-s+1:end, 1:s),         'all', 'omitnan'), ...    % bot-left
+            mean(Iret(end-s+1:end, end-s+1:end), 'all', 'omitnan') ];      % bot-right
+        bgValue_nm = min(cornerMeans);
+        maxBeforeSub = max(Iret(:));
+        Iret = Iret - bgValue_nm;
+        if bgFloorAtZero
+            Iret(Iret < 0) = 0;
+        end
+        if bgValue_nm > bgWarnFracOfMax * maxBeforeSub
+            fprintf('  Frame %d: BG corner means look bright (%.2f nm). Oocyte may overlap ROIs.\n', ...
+                    fr, bgValue_nm);
+        end
+    else
+        bgValue_nm = 0;
+    end
+    bgValues_nm(fr) = bgValue_nm;
+
     %% ----- Boundary detection (snake tracker + catastrophic-failure gate) -----
 
     % Choose segmentation source: external mask images or retardance.
     if useMaskSource && fr <= nMaskFrames
         Iseg = readMask(fr);
         if doCrop; Iseg = imcrop(Iseg, cropRect); end
+        if ~isequal(size(Iseg), size(Iret))
+            if fr == 1
+                fprintf('  Iseg size [%s] differs from Iret [%s]; resizing Iseg to match.\n', ...
+                        num2str(size(Iseg)), num2str(size(Iret)));
+            end
+            Iseg = imresize(Iseg, size(Iret), 'bilinear');
+        end
         segFromMask = true;
     else
         Iseg = Iraw;
@@ -898,6 +943,18 @@ exportgraphics(fig10, fullfile(outDir, 'profile_peak_vs_time.png'), 'Resolution'
 savefig(fig10, fullfile(outDir, 'profile_peak_vs_time.fig'));
 close(fig10);
 
+% --- Plot 11: BG subtraction value over time (diagnostic) ---
+if useBGSubtract
+    fig11 = figure('Position', [100 100 700 350]);
+    plot(time_min, bgValues_nm, 'k-', 'LineWidth', 1.2);
+    xlabel('Time (min)', 'FontSize', 11);
+    ylabel('Background (nm)', 'FontSize', 11);
+    title('Per-frame BG estimate (dimmest corner mean of I_{ret})', 'FontSize', 13);
+    grid on;
+    exportgraphics(fig11, fullfile(outDir, 'bg_subtraction_over_time.png'), 'Resolution', 200);
+    close(fig11);
+end
+
 %% ========================== SAVE DATA =====================================
 results = struct();
 results.kymo                  = kymo;
@@ -943,6 +1000,9 @@ results.sigmaBlur             = sigmaBlur;
 results.closeRadius           = closeRadius;
 results.minArea               = minArea;
 results.peakSearchDepth_um    = peakSearchDepth_um;
+results.bgValues_nm           = bgValues_nm;
+results.useBGSubtract         = useBGSubtract;
+results.bgCornerSize_px       = bgCornerSize_px;
 
 save(fullfile(outDir, 'contour_retardance_results.mat'), '-struct', 'results');
 fprintf('Saved results to: %s\n', fullfile(outDir, 'contour_retardance_results.mat'));
