@@ -6,8 +6,11 @@
 %      TIFFs, or 4-state raw Polscope channels)
 %   2. Converts raw pixel values to retardance in nm using the Polscope
 %      retardance ceiling
-%   3. Detects the oocyte outer boundary using heavy Gaussian blur + Otsu
-%      thresholding + morphological cleanup + bwboundaries
+%   3. Detects the oocyte outer boundary with an active contour (snake)
+%      seeded from a threshold-based initial mask on frame 1, then tracked
+%      frame-to-frame from the previous accepted mask. Catastrophic
+%      failures are rejected by area / centroid sanity checks only — local
+%      deformations (e.g. polar body extrusion) are kept as biology.
 %   4. Samples retardance (nm) along the detected contour at each time point
 %   5. Computes angle-averaged radial retardance profiles from the center
 %      outward through the cortex
@@ -98,10 +101,26 @@ nBoundaryPts   = 500;  % number of uniformly spaced boundary points
 maxDepth_um    = 50;   % how far inward from cortex to sample (microns)
 depthStep_um   = 0.5;  % step size along inward normals (microns)
 
-% --- Mask caching (reuse mask between frames for speed) ---
-useMaskCaching          = true;   % master switch: false = recalculate every frame
-cacheIntensityThreshold = 0.02;   % reuse mask if mean intensity change < 2%
-cacheForceRecalcEveryN  = 25;     % force full recalc every N frames (drift correction)
+% --- Active contour (snake) tracking ---
+% Frame 1: threshold pipeline supplies an initial seed.
+% Frame N>=2: activecontour deforms the previous *accepted* mask using the
+% current image's gradients. This lets real biological deformations
+% (polar body extrusion, cortical wave protrusions) flow through without
+% enforcing circularity. Set useActiveContour=false to fall back to
+% threshold-only per-frame segmentation.
+useActiveContour     = true;
+acIterations         = 60;     % activecontour iterations per frame
+acMethod             = 'edge'; % 'edge' (gradient-driven) or 'Chan-Vese'
+acSmoothFactor       = 1;      % activecontour regularizer (higher = smoother)
+acGaussSigma         = 2;      % light Gaussian blur before snake (preserves edges)
+forceThresholdEveryN = 0;      % >0: re-seed from threshold every N frames
+
+% --- Mask sanity checks (catastrophic-failure detection only) ---
+% Reject the new mask only on global failures: huge area drop, large
+% centroid jump. Do NOT impose shape/circularity priors — the polar
+% body bulge is real signal, not noise.
+maxAreaChangeFrac    = 0.08;   % reject if |area_now - area_prev|/area_prev > this
+maxCenterJump_px     = 40;     % reject if centroid moves more than this many pixels
 
 % --- Angular binning for kymograph ---
 nThetaBins = 100;      % number of angular bins around contour
@@ -260,11 +279,15 @@ distKymo = nan(nFrames, nDepth);
 centroidXY = nan(nFrames, 2);
 meanRadius_px = nan(nFrames, 1);
 
-% --- Cache state for smart mask reuse ---
-cache_prevBW      = [];    % previous binary mask
-cache_prevMeanInt = [];    % previous mean intensity inside mask
-cacheHitCount     = 0;     % diagnostic counter
-cacheRecalcCount  = 0;     % diagnostic counter
+% --- Previous-good-mask state (snake seed + sanity check reference) ---
+prevGoodBW       = [];          % last accepted binary mask
+prevGoodArea     = NaN;         % nnz(prevGoodBW)
+prevGoodCentroid = [NaN NaN];   % centroid of prevGoodBW
+nThresholdSeeds  = 0;           % diagnostic: threshold pipeline invocations
+nMaskAccepted    = 0;           % diagnostic: frames accepted by sanity check
+nMaskRejected    = 0;           % diagnostic: frames reverted to previous good
+
+rejectedFrames   = false(nFrames, 1);   % logical mask of rejected frames
 
 %% ========================== MAIN LOOP =====================================
 fprintf('Processing %d frames...\n', nFrames);
@@ -282,9 +305,9 @@ for fr = 1:nFrames
     % Convert raw pixel values to retardance in nm
     Iret = (Iraw / maxPixVal) * retardance_ceiling_nm;
 
-    %% ----- Boundary detection (with smart mask caching) -----
+    %% ----- Boundary detection (snake tracker + catastrophic-failure gate) -----
 
-    % Choose segmentation source: external mask images or retardance
+    % Choose segmentation source: external mask images or retardance.
     if useMaskSource && fr <= nMaskFrames
         Iseg = readMask(fr);
         if doCrop; Iseg = imcrop(Iseg, cropRect); end
@@ -294,28 +317,16 @@ for fr = 1:nFrames
         segFromMask = false;
     end
 
-    % Decide whether to recalculate or reuse previous mask
-    needsRecalc = true;
+    % Decide whether this frame needs a threshold seed:
+    %   - First frame / no prior mask
+    %   - Scheduled re-seed for drift correction
+    %   - Active contour disabled (legacy mode: threshold every frame)
+    forceReseed     = forceThresholdEveryN > 0 && mod(fr-1, forceThresholdEveryN) == 0;
+    runThresholdSeed = isempty(prevGoodBW) || forceReseed || ~useActiveContour;
 
-    if useMaskCaching && ~isempty(cache_prevBW)
-        if mod(fr, cacheForceRecalcEveryN) == 1
-            needsRecalc = true;   % forced drift correction
-        else
-            % Check intensity change inside previous mask
-            I_norm_check = Iseg / max(Iseg(:));
-            meanIntCurrent = mean(I_norm_check(cache_prevBW), 'omitnan');
-            intensityChange = abs(meanIntCurrent - cache_prevMeanInt) / (cache_prevMeanInt + eps);
-
-            if intensityChange < cacheIntensityThreshold
-                needsRecalc = false;  % cache hit
-            end
-        end
-    end
-
-    if needsRecalc || ~useMaskCaching
-        % --- FULL MASK RECALCULATION ---
+    if runThresholdSeed
+        % ---- THRESHOLD + MORPHOLOGY SEED ----
         I_blur = imgaussfilt(Iseg, sigmaBlur);
-
         I_norm = I_blur / max(I_blur(:));
 
         switch thresholdMode
@@ -375,14 +386,12 @@ for fr = 1:nFrames
                 error('Unknown thresholdMode: %s', thresholdMode);
         end
 
-
-        % Aggressive morphological cleanup
         se = strel('disk', closeRadius);
         BW = imclose(BW, se);
         BW = imfill(BW, 'holes');
         BW = bwareaopen(BW, minArea);
 
-        % Fallback: gradient-based if threshold fails
+        % Gradient fallback if threshold yields nothing.
         if ~any(BW(:))
             [Gmag, ~] = imgradient(I_blur);
             thrG = max(2*mean(Gmag(:)), prctile(Gmag(:), 80));
@@ -392,33 +401,82 @@ for fr = 1:nFrames
             BW = bwareaopen(BW, minArea);
         end
 
-        % Keep largest connected component (fall back to cached mask on failure)
         L = bwlabel(BW, 8);
         if max(L(:)) >= 1
-            S = regionprops(L, 'Area', 'Centroid');
+            S = regionprops(L, 'Area');
             [~, iMax] = max([S.Area]);
-            BW = (L == iMax);
-        elseif ~isempty(cache_prevBW)
-            BW = cache_prevBW;
+            BW_seed = (L == iMax);
+        elseif ~isempty(prevGoodBW)
+            BW_seed = prevGoodBW;
         else
             fprintf('  Frame %d: no boundary found, skipping.\n', fr);
             continue;
         end
-
-        % Update cache
-        if useMaskCaching
-            cache_prevBW = BW;
-            I_norm_cache = Iseg / max(Iseg(:));
-            cache_prevMeanInt = mean(I_norm_cache(BW), 'omitnan');
-        end
-        cacheRecalcCount = cacheRecalcCount + 1;
-
+        nThresholdSeeds = nThresholdSeeds + 1;
     else
-        % --- CACHE REUSE (skip segmentation) ---
-        BW = cache_prevBW;
-        cacheHitCount = cacheHitCount + 1;
+        % Seed the snake from the last accepted mask.
+        BW_seed = prevGoodBW;
     end
-    prevBW = BW;
+
+    % ---- ACTIVE CONTOUR REFINEMENT ----
+    % Snake deforms locally to track real boundary changes (polar body
+    % extrusion, cortical protrusions). No circularity prior.
+    if useActiveContour
+        I_snake = mat2gray(imgaussfilt(Iseg, acGaussSigma));
+        BW_new  = activecontour(I_snake, BW_seed, acIterations, acMethod, ...
+                                'SmoothFactor', acSmoothFactor);
+        BW_new = imfill(BW_new, 'holes');
+        BW_new = bwareaopen(BW_new, minArea);
+
+        Ln = bwlabel(BW_new, 8);
+        if max(Ln(:)) >= 1
+            Sn = regionprops(Ln, 'Area');
+            [~, iMax] = max([Sn.Area]);
+            BW_new = (Ln == iMax);
+        else
+            BW_new = BW_seed;   % snake collapsed — fall back to seed
+        end
+    else
+        BW_new = BW_seed;
+    end
+
+    % ---- SANITY CHECK: only reject catastrophic global failures ----
+    maskAccepted = true;
+    if ~isempty(prevGoodBW)
+        areaNow = nnz(BW_new);
+        sN = regionprops(BW_new, 'Centroid');
+        if isempty(sN)
+            centroidNow = [NaN NaN];
+        else
+            centroidNow = sN(1).Centroid;
+        end
+        areaFrac   = abs(areaNow - prevGoodArea) / (prevGoodArea + eps);
+        centerJump = hypot(centroidNow(1) - prevGoodCentroid(1), ...
+                           centroidNow(2) - prevGoodCentroid(2));
+
+        if areaNow < minArea || ...
+           areaFrac   > maxAreaChangeFrac || ...
+           centerJump > maxCenterJump_px
+            maskAccepted = false;
+            nMaskRejected = nMaskRejected + 1;
+            rejectedFrames(fr) = true;
+            fprintf('  Frame %d: mask rejected (areaFrac=%.3f, centerJump=%.1f px). Reverting.\n', ...
+                    fr, areaFrac, centerJump);
+            BW = prevGoodBW;
+        else
+            BW = BW_new;
+        end
+    else
+        BW = BW_new;
+    end
+
+    if maskAccepted
+        prevGoodBW       = BW;
+        prevGoodArea     = nnz(BW);
+        sG               = regionprops(BW, 'Centroid');
+        prevGoodCentroid = sG(1).Centroid;
+        nMaskAccepted    = nMaskAccepted + 1;
+    end
 
     %% ----- Extract boundary contour -----
     B = bwboundaries(BW);
@@ -897,12 +955,11 @@ fprintf('Median oocyte radius: %.1f um (%.0f px)\n', medianR_um, nanmedian(meanR
 fprintf('Retardance ceiling: %.0f nm (%d-bit)\n', retardance_ceiling_nm, bit_depth);
 fprintf('Mean contour retardance: %.2f +/- %.2f nm\n', ...
     mean(contourMean, 'omitnan'), std(contourMean, 'omitnan'));
-if useMaskCaching
-    totalCached = cacheHitCount + cacheRecalcCount;
-    if totalCached > 0
-        fprintf('Mask cache hits: %d / %d (%.1f%%)\n', ...
-            cacheHitCount, totalCached, 100*cacheHitCount/totalCached);
-    end
+fprintf('Snake tracking: %d accepted, %d rejected, %d threshold seeds\n', ...
+    nMaskAccepted, nMaskRejected, nThresholdSeeds);
+if nMaskRejected > 0
+    rejIdx = find(rejectedFrames);
+    fprintf('Rejected frames: %s\n', mat2str(rejIdx(:)'));
 end
 fprintf('Outputs saved to: %s\n', outDir);
 fprintf('=============================\n');
