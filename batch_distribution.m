@@ -39,7 +39,7 @@ parent_dir = '/path/to/your/data/';
 % 'retardance'  : pre-computed retardance images (default, current behavior)
 % 'four_state'  : raw 4-state Polscope data — State1..State4 summed/averaged
 %                 for segmentation, separate retardance image for measurement
-inputMode = 'retardance';
+inputMode = 'four_state';
 
 % --- File pattern for retardance images inside Pos0 ---
 retardance_pattern = '*Retardance*';
@@ -52,24 +52,53 @@ state_patterns = {'*State1*', '*State2*', '*State3*', '*State4*'};
 opts = struct();
 opts.retardance_ceiling_nm = 50;    % Polscope retardance ceiling (nm)
 opts.bit_depth             = 16;    % image bit depth (16-bit = 0..65535)
-opts.sigmaBlur             = 20;    % Gaussian blur sigma (px) for segmentation
+opts.sigmaBlur             = 1;    % Gaussian blur sigma (px) for segmentation
 opts.closeRadius           = 25;    % morphological close disk radius (px)
 opts.minArea               = 5000;  % minimum object area (px^2) to reject debris
-opts.boundaryInset_px      = 10;    % shift boundary inward onto cortex
-opts.thresholdMode         = 'otsu';
+opts.thresholdMode         = 'adaptive';
 opts.fixedThreshold        = 500;
 opts.percentileThreshold   = 30;
-opts.adaptiveSensitivity   = 0.5;  % for 'adaptive' mode (0-1, higher = more foreground)
+opts.adaptiveSensitivity   = 0.35; % for 'adaptive' mode (0-1, higher = more foreground)
+
+% --- Optional gradient/edge support and active-contour refinement ---
+% These operate on the segmentation image only; retardance measurements still
+% use Iraw converted to nm inside measure_contour_retardance().
+opts.useGradientThreshold     = true;
+opts.gradSigma                = 1;
+opts.gradPercentile           = 90;
+opts.useEdgeThreshold         = true;
+opts.cannyThresholds          = [0.25 0.4];
+opts.edgeDilateRadius         = 1;
+opts.useBoundarySupportMask   = true;
+opts.boundaryCloseRadius      = 20;
+opts.boundaryDilateRadius     = 1;
+opts.useActiveContour         = true;
+opts.activeContourIterations  = 150;
+opts.activeContourMethod      = 'edge';
+opts.activeSmoothFactor       = 1.0;
+opts.activeContractionBias    = 0.0;
 
 % --- Spatial calibration ---
-px_per_um = 6.25;             % pixels per micron (adjust for your objective)
+px_per_um = 6.25/2;             % pixels per micron (adjust for your objective)
+
+% --- Cortical inset depth ---
+boundaryInset_um           = 1.6;   % cortical depth (um), typically 2-3 um
+opts.boundaryInset_px      = round(boundaryInset_um * px_per_um);
+
+% --- Peak-ring depth profiling ---
+opts.um_per_px               = 1 / px_per_um;
+opts.profileMaxDepth_um      = 15;
+opts.profileDepthStep_um     = 0.5;
+opts.peakSearchDepthRange_um = [0 10];
 
 % --- Histogram parameters ---
 nBins       = 100;            % number of histogram bins
-maxRet_nm   = 20;             % max retardance for histogram x-axis (nm)
+maxRet_nm   = 5;             % max retardance for histogram x-axis (nm)
 
 % --- Output ---
 outDir = fullfile(parent_dir, 'batch_retardance_distribution');
+saveOverlays = true;
+overlayDir = fullfile(outDir, 'segmentation_overlays');
 
 % ============================================================================
 %% ========================== FIND ALL SM/Pos0 FOLDERS =====================
@@ -90,22 +119,24 @@ fprintf('Found %d SM folders in:\n  %s\n\n', numel(smDirs), parent_dir);
 
 %% ========================== SETUP ========================================
 if ~exist(outDir, 'dir'); mkdir(outDir); end
+if saveOverlays && ~exist(overlayDir, 'dir'); mkdir(overlayDir); end
 
 um_per_px = 1 / px_per_um;
 
-% Pooled contour retardance values across all oocytes
+% Pooled retardance values across all oocytes
 allContourRet = [];
 
 % Per-oocyte summary statistics
-oocyteNames    = {};
-oocyteMean     = [];
-oocyteMedian   = [];
-oocyteStd      = [];
-oocyteMax      = [];
-oocyteMin      = [];
-oocyteR_um     = [];   % circle-fit radius per oocyte
+oocyteNames        = {};
+oocyteMean         = [];
+oocyteMedian       = [];
+oocyteStd          = [];
+oocyteMax          = [];
+oocyteMin          = [];
+oocyteR_um         = [];   % circle-fit radius per oocyte
+oocytePeakDepth_um = [];   % peak-ring depth per oocyte
 
-% Store per-oocyte contour values for overlay plot
+% Store per-oocyte values for overlay plot
 perOocyteContour = {};
 
 nProcessed = 0;
@@ -130,6 +161,8 @@ for si = 1:numel(smDirs)
     imgLabel = '';
     switch inputMode
         case 'retardance'
+            opts.Iseg = [];
+
             % Find retardance image(s) in Pos0
             d = dir(fullfile(pos0Dir, retardance_pattern));
             d = d(~[d.isdir]);  % exclude directories
@@ -185,6 +218,7 @@ for si = 1:numel(smDirs)
             [~, sortIdx] = sort({d.name});
             d = d(sortIdx);
             Iraw = double(imread(fullfile(d(1).folder, d(1).name)));
+            imgPath = fullfile(d(1).folder, d(1).name);
             imgLabel = sprintf('%s (four_state seg)', d(1).name);
 
         otherwise
@@ -200,23 +234,50 @@ for si = 1:numel(smDirs)
         continue;
     end
 
-    % Pool contour values into the combined dataset
-    cv = res.contourValues;
+    % Use peak-ring values (fall back to contour if peak-ring is empty)
+    if ~isempty(res.peakRingValues)
+        cv        = res.peakRingValues;
+        cvMean    = res.peakRingMean;
+        cvMedian  = res.peakRingMedian;
+        cvStd     = res.peakRingStd;
+        cvMax     = res.peakRingMax;
+        cvMin     = res.peakRingMin;
+        peakDepth = res.peakRingDepth_um;
+    else
+        cv        = res.contourValues;
+        cvMean    = res.contourMean;
+        cvMedian  = median(cv);
+        cvStd     = res.contourStd;
+        cvMax     = res.contourMax;
+        cvMin     = res.contourMin;
+        peakDepth = NaN;
+    end
+
     allContourRet = [allContourRet; cv(:)];
 
     % Per-oocyte statistics
     nProcessed = nProcessed + 1;
-    oocyteNames{nProcessed}      = smName;
-    oocyteMean(nProcessed)        = res.contourMean;
-    oocyteMedian(nProcessed)      = median(cv);
-    oocyteStd(nProcessed)         = res.contourStd;
-    oocyteMax(nProcessed)         = res.contourMax;
-    oocyteMin(nProcessed)         = res.contourMin;
-    oocyteR_um(nProcessed)        = res.R_fit * um_per_px;
-    perOocyteContour{nProcessed}  = cv;
+    oocyteNames{nProcessed}        = smName;
+    oocyteMean(nProcessed)          = cvMean;
+    oocyteMedian(nProcessed)        = cvMedian;
+    oocyteStd(nProcessed)           = cvStd;
+    oocyteMax(nProcessed)           = cvMax;
+    oocyteMin(nProcessed)           = cvMin;
+    oocyteR_um(nProcessed)          = res.R_fit * um_per_px;
+    oocytePeakDepth_um(nProcessed)  = peakDepth;
+    perOocyteContour{nProcessed}    = cv;
 
-    fprintf('  [OK]   %s — %s — contour mean=%.2f nm, R=%.0f um, %d pts\n', ...
-        smName, imgLabel, res.contourMean, oocyteR_um(nProcessed), numel(cv));
+    fprintf('  [OK]   %s — %s — peak depth=%.1f um, mean=%.2f nm, R=%.0f um, %d pts\n', ...
+        smName, imgLabel, peakDepth, cvMean, oocyteR_um(nProcessed), numel(cv));
+
+    if saveOverlays
+        if ~isempty(opts.Iseg)
+            Ioverlay = opts.Iseg;
+        else
+            Ioverlay = Iraw;
+        end
+        save_contour_overlay(Ioverlay, res, overlayDir, smName, imgPath);
+    end
 end
 
 elapsed = toc;
@@ -341,6 +402,7 @@ results.oocyteStd_nm          = oocyteStd;
 results.oocyteMax_nm          = oocyteMax;
 results.oocyteMin_nm          = oocyteMin;
 results.oocyteR_um            = oocyteR_um;
+results.oocytePeakDepth_um    = oocytePeakDepth_um;
 results.nProcessed            = nProcessed;
 results.nSkipped              = nSkipped;
 results.grandMean_nm          = grandMean;
@@ -351,7 +413,13 @@ results.bit_depth             = opts.bit_depth;
 results.px_per_um             = px_per_um;
 results.binEdges_nm           = binEdges;
 results.binCenters_nm         = binCenters;
-results.opts                  = opts;
+saveOpts = opts;
+if isfield(saveOpts, 'Iseg')
+    saveOpts.Iseg = [];
+end
+results.opts                  = saveOpts;
+results.saveOverlays          = saveOverlays;
+results.overlayDir            = overlayDir;
 results.parent_dir            = parent_dir;
 
 save(fullfile(outDir, 'batch_retardance_results.mat'), '-struct', 'results');
@@ -359,17 +427,55 @@ fprintf('Saved results to: %s\n', fullfile(outDir, 'batch_retardance_results.mat
 
 %% ========================== SUMMARY TABLE ================================
 fprintf('\n==================== OOCYTE SUMMARY ====================\n');
-fprintf('%-40s %8s %8s %8s %8s %8s\n', 'Oocyte', 'Mean', 'Median', 'SD', 'Max', 'R(um)');
-fprintf('%-40s %8s %8s %8s %8s %8s\n', '', '(nm)', '(nm)', '(nm)', '(nm)', '');
-fprintf('%s\n', repmat('-', 1, 80));
+fprintf('%-40s %8s %8s %8s %8s %8s %10s\n', 'Oocyte', 'Mean', 'Median', 'SD', 'Max', 'R(um)', 'PeakDepth');
+fprintf('%-40s %8s %8s %8s %8s %8s %10s\n', '', '(nm)', '(nm)', '(nm)', '(nm)', '', '(um)');
+fprintf('%s\n', repmat('-', 1, 90));
 for oi = 1:nProcessed
-    fprintf('%-40s %8.2f %8.2f %8.2f %8.2f %8.1f\n', ...
+    fprintf('%-40s %8.2f %8.2f %8.2f %8.2f %8.1f %10.1f\n', ...
         oocyteNames{oi}, oocyteMean(oi), oocyteMedian(oi), ...
-        oocyteStd(oi), oocyteMax(oi), oocyteR_um(oi));
+        oocyteStd(oi), oocyteMax(oi), oocyteR_um(oi), oocytePeakDepth_um(oi));
 end
-fprintf('%s\n', repmat('-', 1, 80));
+fprintf('%s\n', repmat('-', 1, 90));
 fprintf('%-40s %8.2f %8.2f %8.2f %8.2f\n', ...
     sprintf('GRAND TOTAL (%d oocytes)', nProcessed), ...
     grandMean, grandMedian, grandStd, max(allContourRet));
 fprintf('========================================================\n');
 fprintf('\nOutputs saved to: %s\n', outDir);
+
+function save_contour_overlay(Ioverlay, res, overlayDir, smName, imgPath)
+    [~, baseName, ~] = fileparts(imgPath);
+    safeSmName = regexprep(smName, '[^\w-]', '_');
+    outBase = sprintf('%s_%s', safeSmName, baseName);
+
+    rgbBase = repmat(mat2gray(Ioverlay), 1, 1, 3);
+
+    segBoundary = bwperim(res.BW_initial);
+    activeBoundary = bwperim(res.BW);
+
+    segOverlay = rgbBase;
+    segOverlay(:,:,1) = max(segOverlay(:,:,1), segBoundary);
+
+    activeOverlay = rgbBase;
+    activeOverlay(:,:,2) = max(activeOverlay(:,:,2), activeBoundary);
+
+    combinedOverlay = rgbBase;
+    combinedOverlay(:,:,1) = max(combinedOverlay(:,:,1), segBoundary);
+    combinedOverlay(:,:,2) = max(combinedOverlay(:,:,2), activeBoundary);
+
+    imwrite(segOverlay, fullfile(overlayDir, [outBase '_segmentation_overlay.png']));
+    imwrite(activeOverlay, fullfile(overlayDir, [outBase '_activecontour_overlay.png']));
+    imwrite(combinedOverlay, fullfile(overlayDir, [outBase '_combined_overlay.png']));
+    imwrite(mat2gray(Ioverlay), fullfile(overlayDir, [outBase '_fourstate_base.png']));
+
+    if isfield(res, 'gradMask') && ~isempty(res.gradMask)
+        imwrite(res.gradMask, fullfile(overlayDir, [outBase '_gradient_mask.png']));
+    end
+
+    if isfield(res, 'edgeMask') && ~isempty(res.edgeMask)
+        imwrite(res.edgeMask, fullfile(overlayDir, [outBase '_edge_mask.png']));
+    end
+
+    if isfield(res, 'boundarySupport') && ~isempty(res.boundarySupport)
+        imwrite(res.boundarySupport, fullfile(overlayDir, [outBase '_boundary_support.png']));
+    end
+end
