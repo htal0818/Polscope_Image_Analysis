@@ -25,7 +25,8 @@ function result = measure_contour_retardance(Iraw, opts)
 %               useGradientThreshold   (false)  add high-gradient support mask
 %               gradSigma              (1.5)    Gaussian sigma for gradient image
 %               gradPercentile         (92)     gradient percentile threshold
-%               useEdgeThreshold       (false)  add Canny edge support mask
+%               useEdgeThreshold       (false)  add edge support mask
+%               edgeMethod             ('canny') 'canny' or 'sobel'
 %               cannyThresholds        ([0.08 0.25]) Canny thresholds on normalized image
 %               useBoundarySupportMask (false)  build mask from gradient/edge support
 %               boundaryCloseRadius    (25)     close radius for edge/gradient mask
@@ -80,6 +81,7 @@ function result = measure_contour_retardance(Iraw, opts)
         'gradSigma',             1.5, ...
         'gradPercentile',        92, ...
         'useEdgeThreshold',      true, ...
+        'edgeMethod',            'canny', ...
         'cannyThresholds',       [0.08 0.25], ...
         'edgeDilateRadius',      1, ...
         'useBoundarySupportMask', true, ...
@@ -151,7 +153,14 @@ function result = measure_contour_retardance(Iraw, opts)
         end
 
         if opts.useEdgeThreshold
-            edgeMask = edge(I_edge, 'Canny', opts.cannyThresholds);
+            switch lower(opts.edgeMethod)
+                case 'canny'
+                    edgeMask = edge(I_edge, 'Canny', opts.cannyThresholds);
+                case 'sobel'
+                    edgeMask = edge(I_edge, 'Sobel');
+                otherwise
+                    error('Unknown edgeMethod: %s. Use ''canny'' or ''sobel''.', opts.edgeMethod);
+            end
             edgeMask = bwareaopen(edgeMask, 10);
             boundarySupport = boundarySupport | edgeMask;
         end

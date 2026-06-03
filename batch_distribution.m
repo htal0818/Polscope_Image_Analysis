@@ -67,6 +67,7 @@ opts.useGradientThreshold     = true;
 opts.gradSigma                = 1;
 opts.gradPercentile           = 90;
 opts.useEdgeThreshold         = true;
+opts.edgeMethod               = 'canny';     % 'canny' or 'sobel'
 opts.cannyThresholds          = [0.25 0.4];
 opts.edgeDilateRadius         = 1;
 opts.useBoundarySupportMask   = true;
