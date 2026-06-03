@@ -122,6 +122,44 @@ forceThresholdEveryN = 0;      % >0: re-seed from threshold every N frames
 maxAreaChangeFrac    = 0.08;   % reject if |area_now - area_prev|/area_prev > this
 maxCenterJump_px     = 40;     % reject if centroid moves more than this many pixels
 
+% --- Background subtraction (applied to retardance Iret, per frame) ---
+% Samples four corner boxes of Iret each frame; takes the dimmest corner
+% mean as the BG estimate and subtracts it. Removes slowly-drifting
+% baseline (camera offset, optical leakage) from cortex / cytoplasm /
+% kymograph nm values. Iseg (segmentation source) is left untouched so
+% the snake still sees the original gradient field.
+useBGSubtract        = true;
+bgCornerSize_px      = 100;    % side length (px) of each corner sample box
+bgWarnFracOfMax      = 0.3;    % warn if min corner mean > this * max(Iret)
+                               %   (suggests oocyte is covering all corners)
+bgFloorAtZero        = true;   % clip Iret >= 0 after subtraction
+
+% --- Halo + bright-patch suppression (threshold seed pre-snake) ---
+% Halo: Polscope birefringence ring just outside the cortex inflates the
+% threshold mask. Eroding the seed by ~halo width gives the balloon snake
+% room to expand outward to the real cortex.
+useHaloErode         = true;
+haloErode_um         = 2.5;    % erode seed by this many microns before snake
+useTopHatSuppress    = true;   % top-hat removes bright structures smaller than oocyte
+topHatRadius_um      = 6;      % structuring-element radius for top-hat (um)
+
+% --- Active contour: balloon outward instead of contracting inward ---
+% Negative ContractionBias = balloon force. Combined with the eroded seed,
+% the snake expands to the cortex from inside, eliminating inside-out bias.
+acContractionBias    = -0.3;   % was implicitly +0.3 (default 'edge')
+
+% --- Cortical band from distance transform + depth histogram ---
+% Cut-off located where bin-to-bin median retardance drops most steeply
+% (vs depth) — that's the cortex / interior edge in the radial signal.
+% Clamped to [histMinCutoff_um, histMaxCutoff_um] so a pathological
+% histogram can't drag the band to 0 or into the deep interior.
+cortexBand_um        = 3.5;    % fallback band depth (microns)
+useHistDepthCutoff   = true;   % refine per frame from depth histogram
+histDepthMax_um      = 15;     % max depth considered for the histogram
+histNDepthBins       = 30;     % # depth bins for the histogram fit
+histMinCutoff_um     = 1.5;    % clamp cut-off to at least this (microns)
+histMaxCutoff_um     = 6.0;    % clamp cut-off to at most this  (microns)
+
 % --- Angular binning for kymograph ---
 nThetaBins = 100;      % number of angular bins around contour
 
@@ -289,6 +327,14 @@ nMaskRejected    = 0;           % diagnostic: frames reverted to previous good
 
 rejectedFrames   = false(nFrames, 1);   % logical mask of rejected frames
 
+% --- Background subtraction state ---
+bgValues_nm      = nan(nFrames, 1);     % per-frame BG estimate from corner sampling
+
+% --- Data-driven cortex band state ---
+cortexCutoff_um  = nan(nFrames, 1);              % per-frame band depth (microns)
+cortexMeanRet    = nan(nFrames, 1);              % mean retardance over cortex band (nm)
+cortexBandKymo   = nan(nFrames, nThetaBins);     % per-angle cortex retardance
+
 %% ========================== MAIN LOOP =====================================
 fprintf('Processing %d frames...\n', nFrames);
 tic;
@@ -305,12 +351,42 @@ for fr = 1:nFrames
     % Convert raw pixel values to retardance in nm
     Iret = (Iraw / maxPixVal) * retardance_ceiling_nm;
 
+    % Per-frame BG subtraction (dimmest corner box of Iret)
+    if useBGSubtract
+        s = min(bgCornerSize_px, floor(min(H, W) / 4));
+        cornerMeans = [ ...
+            mean(Iret(1:s,         1:s),         'all', 'omitnan'), ...    % top-left
+            mean(Iret(1:s,         end-s+1:end), 'all', 'omitnan'), ...    % top-right
+            mean(Iret(end-s+1:end, 1:s),         'all', 'omitnan'), ...    % bot-left
+            mean(Iret(end-s+1:end, end-s+1:end), 'all', 'omitnan') ];      % bot-right
+        bgValue_nm = min(cornerMeans);
+        maxBeforeSub = max(Iret(:));
+        Iret = Iret - bgValue_nm;
+        if bgFloorAtZero
+            Iret(Iret < 0) = 0;
+        end
+        if bgValue_nm > bgWarnFracOfMax * maxBeforeSub
+            fprintf('  Frame %d: BG corner means look bright (%.2f nm). Oocyte may overlap ROIs.\n', ...
+                    fr, bgValue_nm);
+        end
+    else
+        bgValue_nm = 0;
+    end
+    bgValues_nm(fr) = bgValue_nm;
+
     %% ----- Boundary detection (snake tracker + catastrophic-failure gate) -----
 
     % Choose segmentation source: external mask images or retardance.
     if useMaskSource && fr <= nMaskFrames
         Iseg = readMask(fr);
         if doCrop; Iseg = imcrop(Iseg, cropRect); end
+        if ~isequal(size(Iseg), size(Iret))
+            if fr == 1
+                fprintf('  Iseg size [%s] differs from Iret [%s]; resizing Iseg to match.\n', ...
+                        num2str(size(Iseg)), num2str(size(Iret)));
+            end
+            Iseg = imresize(Iseg, size(Iret), 'bilinear');
+        end
         segFromMask = true;
     else
         Iseg = Iraw;
@@ -391,6 +467,14 @@ for fr = 1:nFrames
         BW = imfill(BW, 'holes');
         BW = bwareaopen(BW, minArea);
 
+        % Bright-patch suppression: top-hat removes blobs smaller than oocyte.
+        if useTopHatSuppress
+            topHatR_px = max(3, round(topHatRadius_um * px_per_um));
+            se_th = strel('disk', topHatR_px);
+            BW = BW & ~imtophat(BW, se_th);
+            BW = imfill(BW, 'holes');
+        end
+
         % Gradient fallback if threshold yields nothing.
         if ~any(BW(:))
             [Gmag, ~] = imgradient(I_blur);
@@ -418,13 +502,24 @@ for fr = 1:nFrames
         BW_seed = prevGoodBW;
     end
 
+    % Halo erosion: shrink the seed so the balloon snake has room to
+    % expand outward to the true cortex (instead of locking onto the halo).
+    if useHaloErode
+        erodeR_px = max(1, round(haloErode_um * px_per_um));
+        BW_seed_eroded = imerode(BW_seed, strel('disk', erodeR_px));
+        if any(BW_seed_eroded(:))
+            BW_seed = BW_seed_eroded;
+        end
+    end
+
     % ---- ACTIVE CONTOUR REFINEMENT ----
     % Snake deforms locally to track real boundary changes (polar body
     % extrusion, cortical protrusions). No circularity prior.
     if useActiveContour
         I_snake = mat2gray(imgaussfilt(Iseg, acGaussSigma));
         BW_new  = activecontour(I_snake, BW_seed, acIterations, acMethod, ...
-                                'SmoothFactor', acSmoothFactor);
+                                'SmoothFactor',    acSmoothFactor, ...
+                                'ContractionBias', acContractionBias);
         BW_new = imfill(BW_new, 'holes');
         BW_new = bwareaopen(BW_new, minArea);
 
@@ -611,7 +706,7 @@ for fr = 1:nFrames
 
     row = nan(1, nThetaBins);
     if any(valid)
-        row = accumarray(bin(valid), peakRetardance(valid)', [nThetaBins 1], @nanmean, NaN)';
+        row = accumarray(bin(valid).', peakRetardance(valid).', [nThetaBins 1], @nanmean, NaN).';
     end
 
     % Fill missing bins via circular interpolation
@@ -649,6 +744,47 @@ for fr = 1:nFrames
 
     % Also store for the depth-vs-time kymograph
     distKymo(fr, :) = distProfiles(fr, :);
+
+    %% ----- Cortex band: histogram-driven cut-off + per-angle readout -----
+    % D and D_interior already exist; reuse them.
+    cortexCut_um = cortexBand_um;   % fallback if histogram fit is degenerate
+    if useHistDepthCutoff
+        histEdges = linspace(0, histDepthMax_um, histNDepthBins+1);
+        histCtrs  = (histEdges(1:end-1) + histEdges(2:end)) / 2;
+        medByDepth = nan(size(histCtrs));
+        for kHist = 1:numel(histCtrs)
+            mask_k = D_interior >= histEdges(kHist) & D_interior < histEdges(kHist+1);
+            if any(mask_k(:))
+                medByDepth(kHist) = median(Iret(mask_k), 'omitnan');
+            end
+        end
+        dMed = diff(medByDepth);
+        if nnz(~isnan(dMed)) >= 2
+            [~, kDrop] = min(dMed);   % steepest drop in median retardance
+            cortexCut_um = histCtrs(kDrop);
+            cortexCut_um = min(max(cortexCut_um, histMinCutoff_um), histMaxCutoff_um);
+        end
+    end
+    cortexCutoff_um(fr) = cortexCut_um;
+
+    cortexBandMask = (D_interior >= 0) & (D_interior <= cortexCut_um);
+
+    % Frame-scalar: absolute mean retardance over the cortex band
+    if any(cortexBandMask(:))
+        cortexMeanRet(fr) = mean(Iret(cortexBandMask), 'omitnan');
+    end
+
+    % Per-angle cortex retardance — same theta bins as kymo
+    [Ypix, Xpix] = ndgrid(1:H, 1:W);
+    ang_all = atan2(Ypix - yc, Xpix - xc);
+    ang_all(ang_all < 0) = ang_all(ang_all < 0) + 2*pi;
+    binPxC = discretize(ang_all(cortexBandMask), thetaBinEdges);
+    retC   = Iret(cortexBandMask);
+    keepC  = ~isnan(binPxC);
+    if any(keepC)
+        cortexBandKymo(fr, :) = accumarray(binPxC(keepC).', retC(keepC).', ...
+                                            [nThetaBins 1], @nanmean, NaN).';
+    end
 
     %% ----- Save overlay -----
     if saveOverlays && (fr == 1 || mod(fr, overlayEveryN) == 0)
@@ -898,6 +1034,55 @@ exportgraphics(fig10, fullfile(outDir, 'profile_peak_vs_time.png'), 'Resolution'
 savefig(fig10, fullfile(outDir, 'profile_peak_vs_time.fig'));
 close(fig10);
 
+% --- Plot 11: BG subtraction value over time (diagnostic) ---
+if useBGSubtract
+    fig11 = figure('Position', [100 100 700 350]);
+    plot(time_min, bgValues_nm, 'k-', 'LineWidth', 1.2);
+    xlabel('Time (min)', 'FontSize', 11);
+    ylabel('Background (nm)', 'FontSize', 11);
+    title('Per-frame BG estimate (dimmest corner mean of I_{ret})', 'FontSize', 13);
+    grid on;
+    exportgraphics(fig11, fullfile(outDir, 'bg_subtraction_over_time.png'), 'Resolution', 200);
+    close(fig11);
+end
+
+% --- Plot 12: Cortex band mean retardance over time ---
+fig12 = figure('Position', [100 100 800 400]);
+plot(time_min, cortexMeanRet, 'b-', 'LineWidth', 1.5);
+xlabel('Time (min)', 'FontSize', 12);
+ylabel('Cortex band retardance (nm)', 'FontSize', 12);
+title('Mean Retardance over Data-Driven Cortex Band', 'FontSize', 13);
+grid on;
+exportgraphics(fig12, fullfile(outDir, 'cortex_mean_retardance_over_time.png'), 'Resolution', 200);
+savefig(fig12, fullfile(outDir, 'cortex_mean_retardance_over_time.fig'));
+close(fig12);
+
+% --- Plot 13: Per-angle cortex band kymograph ---
+fig13 = figure('Position', [100 100 900 500]);
+imagesc(angles_deg, time_min, cortexBandKymo);
+set(gca, 'YDir', 'normal');
+xlabel('Angle around cortex (deg)', 'FontSize', 12);
+ylabel('Time (min)', 'FontSize', 12);
+title('Cortex Band Retardance (angle vs time)', 'FontSize', 14);
+colormap parula; cb = colorbar;
+cb.Label.String = 'Retardance (nm)';
+exportgraphics(fig13, fullfile(outDir, 'kymograph_cortex_band.png'), 'Resolution', 200);
+savefig(fig13, fullfile(outDir, 'kymograph_cortex_band.fig'));
+close(fig13);
+
+% --- Plot 14: Per-frame cortex / interior cut-off (if histogram-driven) ---
+if useHistDepthCutoff
+    fig14 = figure('Position', [100 100 700 350]);
+    plot(time_min, cortexCutoff_um, 'k-', 'LineWidth', 1.2);
+    yline(cortexBand_um, 'r--', 'Fallback', 'LineWidth', 1, 'LabelHorizontalAlignment', 'left');
+    xlabel('Time (min)', 'FontSize', 11);
+    ylabel('Cortex cut-off depth (\mum)', 'FontSize', 11);
+    title('Histogram-Driven Cortex Band Width Over Time', 'FontSize', 13);
+    grid on;
+    exportgraphics(fig14, fullfile(outDir, 'cortex_cutoff_over_time.png'), 'Resolution', 200);
+    close(fig14);
+end
+
 %% ========================== SAVE DATA =====================================
 results = struct();
 results.kymo                  = kymo;
@@ -943,6 +1128,21 @@ results.sigmaBlur             = sigmaBlur;
 results.closeRadius           = closeRadius;
 results.minArea               = minArea;
 results.peakSearchDepth_um    = peakSearchDepth_um;
+results.bgValues_nm           = bgValues_nm;
+results.useBGSubtract         = useBGSubtract;
+results.bgCornerSize_px       = bgCornerSize_px;
+results.cortexMeanRet         = cortexMeanRet;
+results.cortexBandKymo        = cortexBandKymo;
+results.cortexCutoff_um       = cortexCutoff_um;
+results.cortexBand_um         = cortexBand_um;
+results.haloErode_um          = haloErode_um;
+results.topHatRadius_um       = topHatRadius_um;
+results.acContractionBias     = acContractionBias;
+results.useHaloErode          = useHaloErode;
+results.useTopHatSuppress     = useTopHatSuppress;
+results.useHistDepthCutoff    = useHistDepthCutoff;
+results.histMinCutoff_um      = histMinCutoff_um;
+results.histMaxCutoff_um      = histMaxCutoff_um;
 
 save(fullfile(outDir, 'contour_retardance_results.mat'), '-struct', 'results');
 fprintf('Saved results to: %s\n', fullfile(outDir, 'contour_retardance_results.mat'));
