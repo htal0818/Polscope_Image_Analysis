@@ -158,6 +158,18 @@ fovErodeBorder_um    = 3;      % shrink FOV by this much to skip border halo
 % the snake expands to the cortex from inside, eliminating inside-out bias.
 acContractionBias    = -0.3;   % was implicitly +0.3 (default 'edge')
 
+% --- Outward bias (post-snake dilation for measurement / display) ---
+% The 'edge' snake on State1-4 sum locks onto the cortex INNER edge (where
+% bright cortex meets dark interior — by far the steepest gradient in the
+% image). We want the contour on the cortex OUTER edge, ~one cortex
+% thickness further out. Apply a fixed dilation AFTER the sanity check and
+% AFTER updating prevGoodBW, so:
+%   - the snake operates in a consistent coordinate system frame-to-frame
+%     (no compounding drift),
+%   - downstream measurement and overlays see the outward-shifted boundary.
+useOutwardBias       = true;
+outwardBias_um       = 2.0;    % shift boundary outward by this many microns
+
 % --- Cortical band from distance transform + depth histogram ---
 % Cut-off located where bin-to-bin median retardance drops most steeply
 % (vs depth) — that's the cortex / interior edge in the radial signal.
@@ -612,6 +624,14 @@ for fr = 1:nFrames
         sG               = regionprops(BW, 'Centroid');
         prevGoodCentroid = sG(1).Centroid;
         nMaskAccepted    = nMaskAccepted + 1;
+    end
+
+    % Post-snake outward dilation: shift the measurement boundary onto
+    % the cortex outer edge. prevGoodBW above is the un-dilated snake
+    % output, so the next frame's seed is consistent (no compounding).
+    if useOutwardBias && outwardBias_um > 0
+        dilateR_px = max(1, round(outwardBias_um * px_per_um));
+        BW = imdilate(BW, strel('disk', dilateR_px));
     end
 
     %% ----- Extract boundary contour -----
