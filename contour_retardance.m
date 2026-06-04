@@ -72,7 +72,8 @@ bit_depth = 16;               % image bit depth (16-bit = 0..65535)
 % Heavy blur washes out internal oocyte structure so Otsu finds the gross
 % egg shape. Only used for mask creation — all measurements use raw data.
 sigmaBlur   = 20;      % Gaussian blur sigma (px) for segmentation mask
-closeRadius = 25;      % morphological close disk radius (px)
+openRadius  = 3;       % morphological open disk radius (px) — strips small protrusions
+closeRadius = 25;      % morphological close disk radius (px) — bridges small gaps
 minArea     = 5000;    % minimum object area (px^2) to reject debris
 peakSearchDepth_um = 5;  % max depth (um) along inward normal to search for cortical peak
 
@@ -531,8 +532,9 @@ for fr = 1:nFrames
         end
 
         fovArea = max(nnz(fovMask), 1);
-        se      = strel('disk', closeRadius);
-        se_edge = strel('disk', edgeDilateRadius);
+        se_open  = strel('disk', max(1, openRadius));
+        se_close = strel('disk', closeRadius);
+        se_edge  = strel('disk', edgeDilateRadius);
 
         % Per-method diagnostic storage (frame 1 only).
         if saveAdaptiveDiagnostic && fr == 1 && useAdaptiveThreshold
@@ -624,7 +626,11 @@ for fr = 1:nFrames
             end
 
             % Common cleanup for every candidate.
-            BW_try = imclose(BW_try, se);
+            % open  -> strip small protrusions (threshold noise on the boundary)
+            % close -> bridge small gaps in the cortex outline
+            % fill  -> close interior voids
+            BW_try = imopen(BW_try, se_open);
+            BW_try = imclose(BW_try, se_close);
             BW_try = imfill(BW_try, 'holes');
             BW_try = BW_try & fovMask;
             BW_try = bwareaopen(BW_try, minArea);
@@ -1433,6 +1439,7 @@ results.nBoundaryPts          = nBoundaryPts;
 results.maxDepth_um           = maxDepth_um;
 results.depthStep_um          = depthStep_um;
 results.sigmaBlur             = sigmaBlur;
+results.openRadius            = openRadius;
 results.closeRadius           = closeRadius;
 results.minArea               = minArea;
 results.peakSearchDepth_um    = peakSearchDepth_um;
