@@ -36,6 +36,7 @@ function [R_theta, xc, yc, info] = polar_cortex_boundary(Iret, BW_thresh, params
 %   info    - struct with diagnostic fields (nPeaksFound, nFallback, etc.)
 
 info = struct('nPeaksFound', 0, 'nFallback', 0, 'nMissing', 0, ...
+              'nOutlierRejected', 0, ...
               'R0_px', NaN, 'Rmin_px', NaN, 'Rmax_px', NaN);
 
 R_theta = [];
@@ -122,8 +123,30 @@ for j = 1:params.nTheta
     end
 end
 
-% Periodic smoothing — pad with copies, smooth, trim.
 nT = params.nTheta;
+
+% Angular outlier rejection: rays whose picked radius deviates from a
+% local circular median by more than outlierThreshPx are set to NaN.
+% Catches isolated single-ray peak-pick failures (a ray locks onto a
+% bright internal noise speck) without touching multi-ray real
+% deformations like polar body bulges. The existing NaN-fill below
+% bridges the rejected angles via periodic interp1.
+if isfield(params, 'outlierThreshPx') && params.outlierThreshPx > 0 ...
+   && isfield(params, 'outlierMedianWin') && params.outlierMedianWin > 0
+    R_pad = [R_theta R_theta R_theta];
+    R_med = smoothdata(R_pad, 'movmedian', params.outlierMedianWin, ...
+                       'includenan');
+    R_med = R_med(nT + 1 : 2*nT);
+
+    dev = abs(R_theta - R_med);
+    bad = ~isnan(R_med) & ~isnan(dev) & dev > params.outlierThreshPx;
+    R_theta(bad) = NaN;
+    info.nOutlierRejected = nnz(bad);
+else
+    info.nOutlierRejected = 0;
+end
+
+% Periodic smoothing — pad with copies, smooth, trim.
 R_ext = [R_theta R_theta R_theta];
 R_ext = smoothdata(R_ext, params.smoothMethod, params.smoothWindow, ...
                    'includenan');

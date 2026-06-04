@@ -164,6 +164,15 @@ polarPeakKeepFrac    = 0.15;      % outermost peak must be >= this * max(pkVals)
 polarSmoothMethod    = 'movmedian';
 polarSmoothWindow    = 7;         % narrow median, ~3.5 deg — keeps polar body bulge
 polarSgolayWindow    = 11;        % sgolay window after NaN fill; 0 disables
+% Outlier rejection: rays that pick a peak deviating > polarOutlierThreshPx
+% from the local angular median (computed over polarOutlierMedianWin
+% neighbors) are set to NaN before smoothing. The existing NaN-fill step
+% then bridges them via circular interp1. Catches isolated single-ray
+% spikes from per-angle peak-pick failures (e.g. one ray locking onto
+% a bright internal noise speck) without affecting smooth biological
+% deviations like polar body bulges (which span many neighboring rays).
+polarOutlierMedianWin = 11;       % angular samples for local median (~5.5 deg)
+polarOutlierThreshPx  = 5;        % px deviation from local median = outlier; 0 disables
 polarRefineIters     = 0;         % >0 = run this many Chan-Vese iters after polar
 
 % --- Mask sanity checks (catastrophic-failure detection only) ---
@@ -445,6 +454,7 @@ polarRTheta            = nan(nFrames, polarNTheta);  % R(theta) per frame
 polarNPeaksFound       = zeros(nFrames, 1);
 polarNFallback         = zeros(nFrames, 1);
 polarNMissing          = zeros(nFrames, 1);
+polarNOutlierRejected  = zeros(nFrames, 1);
 polarFailedFrames      = false(nFrames, 1);
 adaptiveScoresByFrame  = nan(nFrames, 1);            % winning sanity score
 
@@ -864,7 +874,9 @@ for fr = 1:nFrames
             'peakKeepFrac',        polarPeakKeepFrac, ...
             'smoothMethod',        polarSmoothMethod, ...
             'smoothWindow',        polarSmoothWindow, ...
-            'sgolayWindow',        polarSgolayWindow);
+            'sgolayWindow',        polarSgolayWindow, ...
+            'outlierMedianWin',    polarOutlierMedianWin, ...
+            'outlierThreshPx',     polarOutlierThreshPx);
 
         [R_theta, xc_p, yc_p, info] = polar_cortex_boundary( ...
             Iret, BW_thresh, polarParams);
@@ -880,8 +892,9 @@ for fr = 1:nFrames
         else
             polarRTheta(fr, :)      = R_theta;
             polarNPeaksFound(fr)    = info.nPeaksFound;
-            polarNFallback(fr)      = info.nFallback;
-            polarNMissing(fr)       = info.nMissing;
+            polarNFallback(fr)         = info.nFallback;
+            polarNMissing(fr)          = info.nMissing;
+            polarNOutlierRejected(fr)  = info.nOutlierRejected;
 
             theta_eval = linspace(0, 2*pi, polarNTheta + 1);
             theta_eval(end) = [];
@@ -1559,6 +1572,7 @@ results.polarRTheta              = polarRTheta;
 results.polarNPeaksFound         = polarNPeaksFound;
 results.polarNFallback           = polarNFallback;
 results.polarNMissing            = polarNMissing;
+results.polarNOutlierRejected    = polarNOutlierRejected;
 results.polarFailedFrames        = polarFailedFrames;
 results.polarNTheta              = polarNTheta;
 results.polarSearchMinFrac       = polarSearchMinFrac;
