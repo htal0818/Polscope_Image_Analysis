@@ -540,9 +540,11 @@ for fr = 1:nFrames
         BW_seed = prevGoodBW;
     end
 
-    % Halo erosion: shrink the seed so the balloon snake has room to
-    % expand outward to the true cortex (instead of locking onto the halo).
-    if useHaloErode
+    % Halo erosion: shrink the threshold-derived seed so the balloon snake
+    % has room to expand outward to the true cortex (instead of locking
+    % onto the halo). Only applied on threshold-seed frames — re-eroding
+    % the previous accepted mask compounds inward drift per frame.
+    if useHaloErode && runThresholdSeed
         erodeR_px = max(1, round(haloErode_um * px_per_um));
         BW_seed_eroded = imerode(BW_seed, strel('disk', erodeR_px));
         if any(BW_seed_eroded(:))
