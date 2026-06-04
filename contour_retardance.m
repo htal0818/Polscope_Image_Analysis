@@ -508,6 +508,17 @@ for fr = 1:nFrames
         % ---- THRESHOLD + MORPHOLOGY SEED ----
         I_blur = imgaussfilt(Iseg, sigmaBlur);
 
+        % Bright-patch suppression on the intensity image. Subtract the
+        % top-hat (bright structures smaller than topHatRadius_um) from
+        % I_blur so Otsu / multiotsu / percentile / gradient never see
+        % the bright patches in the first place. This is the right place
+        % to do it -- imtophat on a binary mask is just an opening.
+        if useTopHatSuppress
+            topHatR_px = max(3, round(topHatRadius_um * px_per_um));
+            se_th      = strel('disk', topHatR_px);
+            I_blur     = I_blur - imtophat(I_blur, se_th);
+        end
+
         I_norm = I_blur / max(I_blur(:));
 
         % Build the cascade list. Adaptive mode tries each method in turn
@@ -520,10 +531,8 @@ for fr = 1:nFrames
         end
 
         fovArea = max(nnz(fovMask), 1);
-        se        = strel('disk', closeRadius);
-        topHatR_px = max(3, round(topHatRadius_um * px_per_um));
-        se_th     = strel('disk', topHatR_px);
-        se_edge   = strel('disk', edgeDilateRadius);
+        se      = strel('disk', closeRadius);
+        se_edge = strel('disk', edgeDilateRadius);
 
         % Per-method diagnostic storage (frame 1 only).
         if saveAdaptiveDiagnostic && fr == 1 && useAdaptiveThreshold
@@ -619,10 +628,8 @@ for fr = 1:nFrames
             BW_try = imfill(BW_try, 'holes');
             BW_try = BW_try & fovMask;
             BW_try = bwareaopen(BW_try, minArea);
-            if useTopHatSuppress
-                BW_try = BW_try & ~imtophat(BW_try, se_th);
-                BW_try = imfill(BW_try, 'holes');
-            end
+            % Bright-patch suppression now runs on I_blur above (see
+            % top-of-cascade), so no per-candidate binary top-hat here.
 
             Lt = bwlabel(BW_try, 8);
             if max(Lt(:)) < 1
