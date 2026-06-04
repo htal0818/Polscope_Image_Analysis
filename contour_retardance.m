@@ -153,6 +153,39 @@ fovDetectFrac        = 0.05;   % FOV = pixels above this fraction of max(Iseg)
 fovMinFrac           = 0.30;   % FOV must cover >= this fraction of image
 fovErodeBorder_um    = 3;      % shrink FOV by this much to skip border halo
 
+% --- Adaptive threshold cascade (dataset-tolerant Otsu replacement) ---
+% Otsu fails inconsistently across datasets because the underlying
+% intensity histogram isn't always cleanly bimodal (polar body adds a 3rd
+% class, illumination drift shifts the threshold, etc). When
+% useAdaptiveThreshold = true, the script:
+%   1. CLAHE-normalizes Iseg so each dataset looks the same to the
+%      thresholder (uniform local intensity distribution).
+%   2. Tries adaptiveTryOrder methods in turn. For each, applies the
+%      same morphology cleanup, keeps the largest component, and scores
+%      it against expected oocyte invariants:
+%        - area between adaptiveMinAreaFrac and adaptiveMaxAreaFrac of FOV
+%        - solidity (area / convex hull area) >= adaptiveMinSolidity
+%        - centroid >= adaptiveEdgeMarginFrac of image dim from any edge
+%      First method that passes sanity wins. If none pass, the
+%      highest-scoring candidate is used and the chosen method is
+%      annotated as 'fallback:<method>' for that frame.
+%   3. Logs the winning method per frame and stores it in
+%      results.thresholdMethodByFrame. Frame-1 overlay also includes a
+%      diagnostic figure showing every method's candidate mask.
+%
+% Set useAdaptiveThreshold = false to use a single threshold method
+% (thresholdMode parameter above).
+useAdaptiveThreshold     = true;
+adaptiveTryOrder         = {'otsu', 'multiotsu', 'percentile', 'gradient'};
+adaptiveMinAreaFrac      = 0.05;   % mask area >= this fraction of fovMask
+adaptiveMaxAreaFrac      = 0.85;   % mask area <= this fraction of fovMask
+adaptiveMinSolidity      = 0.70;   % min area / convex_hull_area
+adaptiveEdgeMarginFrac   = 0.10;   % centroid > this fraction from any image edge
+useCLAHE                 = true;   % CLAHE normalize Iseg before threshold
+claheNumTiles            = [8 8];
+claheClipLimit           = 0.01;
+saveAdaptiveDiagnostic   = true;   % save side-by-side overlay of all methods on frame 1
+
 % --- Active contour: balloon outward instead of contracting inward ---
 % Negative ContractionBias = balloon force. Combined with the eroded seed,
 % the snake expands to the cortex from inside, eliminating inside-out bias.
@@ -357,6 +390,10 @@ cortexCutoff_um  = nan(nFrames, 1);              % per-frame band depth (microns
 cortexMeanRet    = nan(nFrames, 1);              % mean retardance over cortex band (nm)
 cortexBandKymo   = nan(nFrames, nThetaBins);     % per-angle cortex retardance
 
+% --- Adaptive threshold log ---
+thresholdMethodByFrame = repmat({''}, nFrames, 1);   % winner method per frame
+adaptiveScoresByFrame  = nan(nFrames, 1);            % winning sanity score
+
 %% ========================== MAIN LOOP =====================================
 fprintf('Processing %d frames...\n', nFrames);
 tic;
@@ -450,102 +487,230 @@ for fr = 1:nFrames
     if runThresholdSeed
         % ---- THRESHOLD + MORPHOLOGY SEED ----
         I_blur = imgaussfilt(Iseg, sigmaBlur);
-        I_norm = I_blur / max(I_blur(:));
 
-        switch thresholdMode
-            case 'otsu'
-                % Compute Otsu threshold only on pixels inside the FOV so
-                % the FOV / black-border contrast doesn't dominate the split.
-                Totsu = graythresh(I_norm(fovMask));
-                if segFromMask
-                    BW = I_norm < Totsu;
-                else
-                    BW = I_norm > Totsu;
-                end
-
-            case 'fixed'
-                if segFromMask
-                    BW = I_blur < fixedThreshold;
-                else
-                    BW = I_blur > fixedThreshold;
-                end
-
-            case 'percentile'
-                pVal = prctile(I_blur(:), percentileThreshold);
-                if segFromMask
-                    BW = I_blur < pVal;
-                else
-                    BW = I_blur > pVal;
-                end
-
-            case 'adaptive'
-                nhd = min(adaptNeighborhood, 2*floor(min(size(I_norm))/4)+1);
-                T = adaptthresh(I_norm, adaptSensitivity, ...
-                        'NeighborhoodSize', nhd);
-                BW = imbinarize(I_norm, T);
-                if segFromMask
-                    BW = ~BW;
-                end
-
-            case 'edge'
-                edges = edge(I_norm, edgeMethod);
-                se_edge = strel('disk', edgeDilateRadius);
-                edges = imdilate(edges, se_edge);
-                BW = imfill(edges, 'holes');
-                if segFromMask && sum(BW(:)) > 0.5 * numel(BW)
-                    BW = ~BW;
-                end
-
-            case 'gradient'
-                [Gmag, ~] = imgradient(I_blur);
-                thrG = prctile(Gmag(:), gradientPercentile);
-                BW_edges = Gmag >= thrG;
-                se_edge = strel('disk', edgeDilateRadius);
-                BW_edges = imdilate(BW_edges, se_edge);
-                BW = imfill(BW_edges, 'holes');
-                if segFromMask && sum(BW(:)) > 0.5 * numel(BW)
-                    BW = ~BW;
-                end
-
-            otherwise
-                error('Unknown thresholdMode: %s', thresholdMode);
-        end
-
-        se = strel('disk', closeRadius);
-        BW = imclose(BW, se);
-        BW = imfill(BW, 'holes');
-        BW = BW & fovMask;          % confine threshold to imaging FOV
-        BW = bwareaopen(BW, minArea);
-
-        % Bright-patch suppression: top-hat removes blobs smaller than oocyte.
-        if useTopHatSuppress
-            topHatR_px = max(3, round(topHatRadius_um * px_per_um));
-            se_th = strel('disk', topHatR_px);
-            BW = BW & ~imtophat(BW, se_th);
-            BW = imfill(BW, 'holes');
-        end
-
-        % Gradient fallback if threshold yields nothing.
-        if ~any(BW(:))
-            [Gmag, ~] = imgradient(I_blur);
-            thrG = max(2*mean(Gmag(:)), prctile(Gmag(:), 80));
-            BW = Gmag >= thrG;
-            BW = imclose(BW, se);
-            BW = imfill(BW, 'holes');
-            BW = bwareaopen(BW, minArea);
-        end
-
-        L = bwlabel(BW, 8);
-        if max(L(:)) >= 1
-            S = regionprops(L, 'Area');
-            [~, iMax] = max([S.Area]);
-            BW_seed = (L == iMax);
-        elseif ~isempty(prevGoodBW)
-            BW_seed = prevGoodBW;
+        % CLAHE pre-normalize so each dataset's intensity distribution
+        % looks the same to the thresholder. If disabled, fall back to
+        % simple max-normalize (legacy behavior).
+        if useCLAHE
+            I_norm = adapthisteq(mat2gray(I_blur), ...
+                                  'NumTiles',  claheNumTiles, ...
+                                  'ClipLimit', claheClipLimit);
         else
-            fprintf('  Frame %d: no boundary found, skipping.\n', fr);
-            continue;
+            I_norm = I_blur / max(I_blur(:));
         end
+
+        % Build the cascade list. Adaptive mode tries each method in turn
+        % and accepts the first sane one. Legacy mode keeps only
+        % thresholdMode and skips sanity check (preserves old behavior).
+        if useAdaptiveThreshold
+            methodList = adaptiveTryOrder;
+        else
+            methodList = {thresholdMode};
+        end
+
+        fovArea = max(nnz(fovMask), 1);
+        se        = strel('disk', closeRadius);
+        topHatR_px = max(3, round(topHatRadius_um * px_per_um));
+        se_th     = strel('disk', topHatR_px);
+        se_edge   = strel('disk', edgeDilateRadius);
+
+        % Per-method diagnostic storage (frame 1 only).
+        if saveAdaptiveDiagnostic && fr == 1 && useAdaptiveThreshold
+            diagnosticMasks = cell(1, numel(methodList));
+            diagnosticScores = nan(1, numel(methodList));
+        else
+            diagnosticMasks = {};
+            diagnosticScores = [];
+        end
+
+        BW_seed       = [];
+        methodUsed    = '';
+        winningScore  = -Inf;
+        bestBW        = [];
+        bestMethod    = '';
+
+        for tryIdx = 1:numel(methodList)
+            tm = methodList{tryIdx};
+
+            % Compute candidate binary mask for this method.
+            switch tm
+                case 'otsu'
+                    Totsu = graythresh(I_norm(fovMask));
+                    if segFromMask
+                        BW_try = I_norm < Totsu;
+                    else
+                        BW_try = I_norm > Totsu;
+                    end
+
+                case 'multiotsu'
+                    % Multi-Otsu (2 thresholds, 3 classes). For State sums
+                    % with dark interior, the oocyte sits in the middle
+                    % class (darker than medium, brighter than border).
+                    try
+                        Tm = multithresh(I_norm(fovMask), 2);
+                    catch
+                        continue;   % degenerate histogram, skip
+                    end
+                    if segFromMask
+                        BW_try = I_norm < Tm(2) & I_norm > Tm(1);
+                    else
+                        BW_try = I_norm > Tm(1) & I_norm < Tm(2);
+                    end
+
+                case 'fixed'
+                    if segFromMask
+                        BW_try = I_blur < fixedThreshold;
+                    else
+                        BW_try = I_blur > fixedThreshold;
+                    end
+
+                case 'percentile'
+                    pVal = prctile(I_norm(fovMask), percentileThreshold);
+                    if segFromMask
+                        BW_try = I_norm < pVal;
+                    else
+                        BW_try = I_norm > pVal;
+                    end
+
+                case 'adaptive'
+                    nhd = min(adaptNeighborhood, 2*floor(min(size(I_norm))/4)+1);
+                    Ta = adaptthresh(I_norm, adaptSensitivity, ...
+                                     'NeighborhoodSize', nhd);
+                    BW_try = imbinarize(I_norm, Ta);
+                    if segFromMask
+                        BW_try = ~BW_try;
+                    end
+
+                case 'edge'
+                    edges = edge(I_norm, edgeMethod);
+                    edges = imdilate(edges, se_edge);
+                    BW_try = imfill(edges, 'holes');
+                    if segFromMask && sum(BW_try(:)) > 0.5 * numel(BW_try)
+                        BW_try = ~BW_try;
+                    end
+
+                case 'gradient'
+                    [Gmag, ~] = imgradient(I_blur);
+                    thrG = prctile(Gmag(:), gradientPercentile);
+                    BW_edges = Gmag >= thrG;
+                    BW_edges = imdilate(BW_edges, se_edge);
+                    BW_try = imfill(BW_edges, 'holes');
+                    if segFromMask && sum(BW_try(:)) > 0.5 * numel(BW_try)
+                        BW_try = ~BW_try;
+                    end
+
+                otherwise
+                    error('Unknown thresholdMode in cascade: %s', tm);
+            end
+
+            % Common cleanup for every candidate.
+            BW_try = imclose(BW_try, se);
+            BW_try = imfill(BW_try, 'holes');
+            BW_try = BW_try & fovMask;
+            BW_try = bwareaopen(BW_try, minArea);
+            if useTopHatSuppress
+                BW_try = BW_try & ~imtophat(BW_try, se_th);
+                BW_try = imfill(BW_try, 'holes');
+            end
+
+            Lt = bwlabel(BW_try, 8);
+            if max(Lt(:)) < 1
+                if ~isempty(diagnosticMasks)
+                    diagnosticMasks{tryIdx} = false(size(Iseg));
+                    diagnosticScores(tryIdx) = -Inf;
+                end
+                continue;
+            end
+            St = regionprops(Lt, 'Area', 'Solidity', 'Centroid');
+            [~, iMax] = max([St.Area]);
+            BW_try = (Lt == iMax);
+
+            % Sanity invariants.
+            areaFrac    = St(iMax).Area / fovArea;
+            solidity    = St(iMax).Solidity;
+            cx          = St(iMax).Centroid(1);
+            cy          = St(iMax).Centroid(2);
+            edgeMargin  = min([cx, W-cx, cy, H-cy]) / min(H, W);
+
+            passArea  = areaFrac >= adaptiveMinAreaFrac && ...
+                        areaFrac <= adaptiveMaxAreaFrac;
+            passSolid = solidity >= adaptiveMinSolidity;
+            passEdge  = edgeMargin >= adaptiveEdgeMarginFrac;
+            isSane    = passArea && passSolid && passEdge;
+
+            % Fallback score: rewards solidity, central position, and
+            % an area near the middle of the allowed range.
+            midAreaFrac = (adaptiveMinAreaFrac + adaptiveMaxAreaFrac) / 2;
+            score = solidity * edgeMargin * ...
+                    (1 - min(abs(areaFrac - midAreaFrac) / midAreaFrac, 1));
+
+            if ~isempty(diagnosticMasks)
+                diagnosticMasks{tryIdx}  = BW_try;
+                diagnosticScores(tryIdx) = score;
+            end
+
+            if useAdaptiveThreshold && isSane
+                BW_seed      = BW_try;
+                methodUsed   = tm;
+                winningScore = score;
+                break;
+            elseif ~useAdaptiveThreshold
+                BW_seed      = BW_try;
+                methodUsed   = tm;
+                winningScore = score;
+                break;
+            elseif score > winningScore
+                bestBW       = BW_try;
+                bestMethod   = tm;
+                winningScore = score;
+            end
+        end
+
+        % If none of the cascade methods passed sanity, use the
+        % highest-scoring candidate and mark it as a fallback.
+        if isempty(BW_seed)
+            if ~isempty(bestBW)
+                BW_seed    = bestBW;
+                methodUsed = ['fallback:' bestMethod];
+            elseif ~isempty(prevGoodBW)
+                BW_seed    = prevGoodBW;
+                methodUsed = 'fallback:prevGood';
+            else
+                fprintf('  Frame %d: no candidate boundary found, skipping.\n', fr);
+                continue;
+            end
+        end
+
+        thresholdMethodByFrame{fr} = methodUsed;
+        adaptiveScoresByFrame(fr)  = winningScore;
+        fprintf('  Frame %d threshold: %-22s (score=%.3f)\n', fr, methodUsed, winningScore);
+
+        % Diagnostic overlay for frame 1: every cascade candidate side-by-side.
+        if ~isempty(diagnosticMasks) && fr == 1 && saveOverlays
+            nMethods = numel(diagnosticMasks);
+            nCols = ceil(sqrt(nMethods));
+            nRows = ceil(nMethods / nCols);
+            figD = figure('Visible', 'off', 'Position', [50 50 360*nCols 320*nRows]);
+            for di = 1:nMethods
+                subplot(nRows, nCols, di);
+                imagesc(Iseg); colormap gray; axis image; hold on;
+                bdy = bwboundaries(diagnosticMasks{di});
+                for bi = 1:numel(bdy)
+                    plot(bdy{bi}(:,2), bdy{bi}(:,1), 'r-', 'LineWidth', 1);
+                end
+                tag = methodList{di};
+                if strcmp(tag, methodUsed) || strcmp(['fallback:' tag], methodUsed)
+                    tag = ['[picked] ' tag];
+                end
+                title(sprintf('%s   score=%.3f', tag, diagnosticScores(di)), ...
+                      'Interpreter', 'none', 'FontSize', 9);
+                set(gca, 'XTick', [], 'YTick', []);
+            end
+            exportgraphics(figD, fullfile(overlayDir, 'adaptive_threshold_methods_frame1.png'), ...
+                           'Resolution', 200);
+            close(figD);
+        end
+
         nThresholdSeeds = nThresholdSeeds + 1;
     else
         % Seed the snake from the last accepted mask.
@@ -1206,7 +1371,12 @@ results.useHaloErode          = useHaloErode;
 results.useTopHatSuppress     = useTopHatSuppress;
 results.useHistDepthCutoff    = useHistDepthCutoff;
 results.histMinCutoff_um      = histMinCutoff_um;
-results.histMaxCutoff_um      = histMaxCutoff_um;
+results.histMaxCutoff_um         = histMaxCutoff_um;
+results.thresholdMethodByFrame   = thresholdMethodByFrame;
+results.adaptiveScoresByFrame    = adaptiveScoresByFrame;
+results.useAdaptiveThreshold     = useAdaptiveThreshold;
+results.adaptiveTryOrder         = adaptiveTryOrder;
+results.useCLAHE                 = useCLAHE;
 
 save(fullfile(outDir, 'contour_retardance_results.mat'), '-struct', 'results');
 fprintf('Saved results to: %s\n', fullfile(outDir, 'contour_retardance_results.mat'));
