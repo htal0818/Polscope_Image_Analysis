@@ -109,7 +109,7 @@ depthStep_um   = 0.5;  % step size along inward normals (microns)
 % (polar body extrusion, cortical wave protrusions) flow through without
 % enforcing circularity. Set useActiveContour=false to fall back to
 % threshold-only per-frame segmentation.
-useActiveContour     = true;
+useActiveContour     = false;     % off when useRadialBoundary=true; set true to A/B
 acIterations         = 60;     % activecontour iterations per frame
 acMethod             = 'edge'; % 'edge' (gradient-driven) or 'Chan-Vese'
 acSmoothFactor       = 1;      % activecontour regularizer (higher = smoother)
@@ -152,7 +152,7 @@ blendCloseRadius_px   = 3;             % SE radius for union_close blend
 % Optional mild snake refinement runs after the polar curve if
 % polarRefineIters > 0 (seeded by the polar mask, no drift since
 % iteration count is small).
-useRadialBoundary    = false;
+useRadialBoundary    = true;      % polar method default; flip false for snake
 polarNTheta          = 720;       % angular samples (0.5 deg)
 polarNR              = 400;       % radial samples in the search band
 polarSearchMinFrac   = 0.6;       % inner search bound (fraction of R0)
@@ -160,8 +160,10 @@ polarSearchMaxFrac   = 1.4;       % outer search bound (fraction of R0)
 polarSmoothSigma     = 1.0;       % Gaussian sigma (px) on Iret before sampling
 polarMinPeakValue    = 0.05;      % findpeaks MinPeakHeight (nm)
 polarMinPeakProm     = 0.02;      % findpeaks MinPeakProminence (nm)
+polarPeakKeepFrac    = 0.25;      % outermost peak must be >= this * max(pkVals)
 polarSmoothMethod    = 'movmedian';
-polarSmoothWindow    = 7;         % narrow, ~3.5 deg — keeps polar body bulge
+polarSmoothWindow    = 7;         % narrow median, ~3.5 deg — keeps polar body bulge
+polarSgolayWindow    = 21;        % sgolay window after NaN fill; 0 disables
 polarRefineIters     = 0;         % >0 = run this many Chan-Vese iters after polar
 
 % --- Mask sanity checks (catastrophic-failure detection only) ---
@@ -859,8 +861,10 @@ for fr = 1:nFrames
             'smoothSigma',         polarSmoothSigma, ...
             'minPeakValue',        polarMinPeakValue, ...
             'minPeakProminence',   polarMinPeakProm, ...
+            'peakKeepFrac',        polarPeakKeepFrac, ...
             'smoothMethod',        polarSmoothMethod, ...
-            'smoothWindow',        polarSmoothWindow);
+            'smoothWindow',        polarSmoothWindow, ...
+            'sgolayWindow',        polarSgolayWindow);
 
         [R_theta, xc_p, yc_p, info] = polar_cortex_boundary( ...
             Iret, BW_thresh, polarParams);
@@ -1560,6 +1564,8 @@ results.polarNTheta              = polarNTheta;
 results.polarSearchMinFrac       = polarSearchMinFrac;
 results.polarSearchMaxFrac       = polarSearchMaxFrac;
 results.polarSmoothWindow        = polarSmoothWindow;
+results.polarSgolayWindow        = polarSgolayWindow;
+results.polarPeakKeepFrac        = polarPeakKeepFrac;
 
 save(fullfile(outDir, 'contour_retardance_results.mat'), '-struct', 'results');
 fprintf('Saved results to: %s\n', fullfile(outDir, 'contour_retardance_results.mat'));

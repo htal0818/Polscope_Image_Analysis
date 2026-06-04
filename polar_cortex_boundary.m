@@ -95,8 +95,20 @@ for j = 1:params.nTheta
     end
 
     if ~isempty(pkLocs)
-        [~, iMaxPk] = max(pkVals);
-        R_theta(j) = r(pkLocs(iMaxPk));
+        % Outermost significant peak: from the peaks that pass the
+        % prominence test, take the one at the largest radius whose
+        % value is at least 25% of the strongest peak. Avoids locking
+        % onto inner cortex-band peaks (cytoplasmic edge of the bright
+        % cortex ring) when a comparable outer peak (cortex outer edge)
+        % exists further out.
+        valid = pkVals > params.peakKeepFrac * max(pkVals);
+        if any(valid)
+            iValid = find(valid, 1, 'last');
+            R_theta(j) = r(pkLocs(iValid));
+        else
+            [~, iMaxPk] = max(pkVals);
+            R_theta(j)  = r(pkLocs(iMaxPk));
+        end
         info.nPeaksFound = info.nPeaksFound + 1;
     else
         % Fallback: global max in the search band.
@@ -125,6 +137,15 @@ if any(nanIdx) && any(~nanIdx)
     x_ext = [valIdx - nT, valIdx, valIdx + nT];
     y_ext = [R_theta(valIdx), R_theta(valIdx), R_theta(valIdx)];
     R_theta(nanIdx) = interp1(x_ext, y_ext, nanLocs, 'linear', 'extrap');
+end
+
+% Final low-pass smoothing — Savitzky-Golay preserves the polar body
+% bulge (it's a localized polynomial fit, not a kernel average) while
+% removing per-angle sawtooth oscillations from peak-pick noise.
+if isfield(params, 'sgolayWindow') && params.sgolayWindow > 0
+    R_ext = [R_theta R_theta R_theta];
+    R_ext = smoothdata(R_ext, 'sgolay', params.sgolayWindow);
+    R_theta = R_ext(nT + 1 : 2*nT);
 end
 
 end
