@@ -782,7 +782,7 @@ for fr = 1:nFrames
     retC   = Iret(cortexBandMask);
     keepC  = ~isnan(binPxC);
     if any(keepC)
-        cortexBandKymo(fr, :) = accumarray(binPxC(keepC).', retC(keepC).', ...
+        cortexBandKymo(fr, :) = accumarray(binPxC(keepC), retC(keepC), ...
                                             [nThetaBins 1], @nanmean, NaN).';
     end
 
