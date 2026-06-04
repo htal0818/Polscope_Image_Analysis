@@ -156,14 +156,14 @@ useRadialBoundary    = true;      % polar method default; flip false for snake
 polarNTheta          = 720;       % angular samples (0.5 deg)
 polarNR              = 400;       % radial samples in the search band
 polarSearchMinFrac   = 0.6;       % inner search bound (fraction of R0)
-polarSearchMaxFrac   = 1.4;       % outer search bound (fraction of R0)
+polarSearchMaxFrac   = 1.6;       % outer search bound (fraction of R0)
 polarSmoothSigma     = 1.0;       % Gaussian sigma (px) on Iret before sampling
 polarMinPeakValue    = 0.05;      % findpeaks MinPeakHeight (nm)
 polarMinPeakProm     = 0.02;      % findpeaks MinPeakProminence (nm)
-polarPeakKeepFrac    = 0.25;      % outermost peak must be >= this * max(pkVals)
+polarPeakKeepFrac    = 0.15;      % outermost peak must be >= this * max(pkVals)
 polarSmoothMethod    = 'movmedian';
 polarSmoothWindow    = 7;         % narrow median, ~3.5 deg — keeps polar body bulge
-polarSgolayWindow    = 21;        % sgolay window after NaN fill; 0 disables
+polarSgolayWindow    = 11;        % sgolay window after NaN fill; 0 disables
 polarRefineIters     = 0;         % >0 = run this many Chan-Vese iters after polar
 
 % --- Mask sanity checks (catastrophic-failure detection only) ---
