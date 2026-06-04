@@ -136,6 +136,34 @@ reseedAreaFrac        = 0.03;          % area_change mode trigger (fraction)
 blendOp               = 'union_close'; % 'union' | 'union_close' | 'intersect'
 blendCloseRadius_px   = 3;             % SE radius for union_close blend
 
+% --- Radial (polar) boundary detection ---
+% Estimate the cortex boundary by per-angle radial peak search on the
+% retardance image. Each frame is segmented independently from the
+% threshold mask's centroid — no temporal state, no per-frame seed
+% reuse, no drift accumulation. Replaces the snake when enabled.
+%
+% Pipeline:
+%   threshold cascade -> BW_thresh -> centroid (xc, yc) + R0
+%   polar grid over [polarSearchMinFrac, polarSearchMaxFrac] * R0
+%   per angle: findpeaks on Iret radial profile, take strongest local max
+%   smoothdata (movmedian, narrow window — keeps polar body bulge)
+%   poly2mask -> BW
+%
+% Optional mild snake refinement runs after the polar curve if
+% polarRefineIters > 0 (seeded by the polar mask, no drift since
+% iteration count is small).
+useRadialBoundary    = false;
+polarNTheta          = 720;       % angular samples (0.5 deg)
+polarNR              = 400;       % radial samples in the search band
+polarSearchMinFrac   = 0.6;       % inner search bound (fraction of R0)
+polarSearchMaxFrac   = 1.4;       % outer search bound (fraction of R0)
+polarSmoothSigma     = 1.0;       % Gaussian sigma (px) on Iret before sampling
+polarMinPeakValue    = 0.05;      % findpeaks MinPeakHeight (nm)
+polarMinPeakProm     = 0.02;      % findpeaks MinPeakProminence (nm)
+polarSmoothMethod    = 'movmedian';
+polarSmoothWindow    = 7;         % narrow, ~3.5 deg — keeps polar body bulge
+polarRefineIters     = 0;         % >0 = run this many Chan-Vese iters after polar
+
 % --- Mask sanity checks (catastrophic-failure detection only) ---
 % Reject the new mask only on global failures: huge area drop, large
 % centroid jump. Do NOT impose shape/circularity priors — the polar
@@ -409,6 +437,13 @@ cortexBandKymo   = nan(nFrames, nThetaBins);     % per-angle cortex retardance
 % --- Adaptive threshold log ---
 thresholdMethodByFrame = repmat({''}, nFrames, 1);   % winner method per frame
 seedReasonByFrame      = repmat({''}, nFrames, 1);   % seed strategy that fired per frame
+
+% --- Radial boundary diagnostics ---
+polarRTheta            = nan(nFrames, polarNTheta);  % R(theta) per frame
+polarNPeaksFound       = zeros(nFrames, 1);
+polarNFallback         = zeros(nFrames, 1);
+polarNMissing          = zeros(nFrames, 1);
+polarFailedFrames      = false(nFrames, 1);
 adaptiveScoresByFrame  = nan(nFrames, 1);            % winning sanity score
 
 %% ========================== MAIN LOOP =====================================
@@ -814,16 +849,64 @@ for fr = 1:nFrames
         end
     end
 
-    % ---- ACTIVE CONTOUR REFINEMENT ----
-    % Snake deforms locally to track real boundary changes (polar body
-    % extrusion, cortical protrusions). No circularity prior.
-    if useActiveContour
+    % ---- BOUNDARY REFINEMENT: polar radial peak search OR snake ----
+    if useRadialBoundary
+        polarParams = struct(...
+            'nTheta',              polarNTheta, ...
+            'nR',                  polarNR, ...
+            'cortexSearchMinFrac', polarSearchMinFrac, ...
+            'cortexSearchMaxFrac', polarSearchMaxFrac, ...
+            'smoothSigma',         polarSmoothSigma, ...
+            'minPeakValue',        polarMinPeakValue, ...
+            'minPeakProminence',   polarMinPeakProm, ...
+            'smoothMethod',        polarSmoothMethod, ...
+            'smoothWindow',        polarSmoothWindow);
+
+        [R_theta, xc_p, yc_p, info] = polar_cortex_boundary( ...
+            Iret, BW_thresh, polarParams);
+
+        if isempty(R_theta) || all(isnan(R_theta))
+            % Polar method failed (e.g. empty BW_thresh) — fall back
+            polarFailedFrames(fr) = true;
+            BW_new = BW_thresh;
+            if isempty(BW_new) && ~isempty(prevGoodBW)
+                BW_new = prevGoodBW;
+            end
+            fprintf('  Frame %d: polar boundary failed, fell back.\n', fr);
+        else
+            polarRTheta(fr, :)      = R_theta;
+            polarNPeaksFound(fr)    = info.nPeaksFound;
+            polarNFallback(fr)      = info.nFallback;
+            polarNMissing(fr)       = info.nMissing;
+
+            theta_eval = linspace(0, 2*pi, polarNTheta + 1);
+            theta_eval(end) = [];
+            polyXq = xc_p + R_theta .* cos(theta_eval);
+            polyYq = yc_p + R_theta .* sin(theta_eval);
+            BW_new = poly2mask(polyXq, polyYq, H, W);
+            BW_new = BW_new & fovMask;
+            BW_new = bwareaopen(BW_new, minArea);
+
+            % Optional mild Chan-Vese cleanup on top of the polar curve.
+            if polarRefineIters > 0
+                I_snake = mat2gray(imgaussfilt(Iret, acGaussSigma));
+                BW_new = activecontour(I_snake, BW_new, polarRefineIters, ...
+                                       'Chan-Vese', ...
+                                       'SmoothFactor', acSmoothFactor, ...
+                                       'ContractionBias', 0);
+                BW_new = imfill(BW_new, 'holes');
+                BW_new = BW_new & fovMask;
+                BW_new = bwareaopen(BW_new, minArea);
+            end
+        end
+
+    elseif useActiveContour
         I_snake = mat2gray(imgaussfilt(Iseg, acGaussSigma));
         BW_new  = activecontour(I_snake, BW_seed, acIterations, acMethod, ...
                                 'SmoothFactor',    acSmoothFactor, ...
                                 'ContractionBias', acContractionBias);
         BW_new = imfill(BW_new, 'holes');
-        BW_new = BW_new & fovMask;   % keep snake inside the imaging FOV
+        BW_new = BW_new & fovMask;
         BW_new = bwareaopen(BW_new, minArea);
 
         Ln = bwlabel(BW_new, 8);
@@ -832,7 +915,7 @@ for fr = 1:nFrames
             [~, iMax] = max([Sn.Area]);
             BW_new = (Ln == iMax);
         else
-            BW_new = BW_seed;   % snake collapsed — fall back to seed
+            BW_new = BW_seed;
         end
     else
         BW_new = BW_seed;
@@ -1467,6 +1550,16 @@ results.reseedStrategy           = reseedStrategy;
 results.reseedAreaFrac           = reseedAreaFrac;
 results.blendOp                  = blendOp;
 results.blendCloseRadius_px      = blendCloseRadius_px;
+results.useRadialBoundary        = useRadialBoundary;
+results.polarRTheta              = polarRTheta;
+results.polarNPeaksFound         = polarNPeaksFound;
+results.polarNFallback           = polarNFallback;
+results.polarNMissing            = polarNMissing;
+results.polarFailedFrames        = polarFailedFrames;
+results.polarNTheta              = polarNTheta;
+results.polarSearchMinFrac       = polarSearchMinFrac;
+results.polarSearchMaxFrac       = polarSearchMaxFrac;
+results.polarSmoothWindow        = polarSmoothWindow;
 
 save(fullfile(outDir, 'contour_retardance_results.mat'), '-struct', 'results');
 fprintf('Saved results to: %s\n', fullfile(outDir, 'contour_retardance_results.mat'));
