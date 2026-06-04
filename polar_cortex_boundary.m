@@ -36,6 +36,7 @@ function [R_theta, xc, yc, info] = polar_cortex_boundary(Iret, BW_thresh, params
 %   info    - struct with diagnostic fields (nPeaksFound, nFallback, etc.)
 
 info = struct('nPeaksFound', 0, 'nFallback', 0, 'nMissing', 0, ...
+              'nContinuityRevised', 0, ...
               'R0_px', NaN, 'Rmin_px', NaN, 'Rmax_px', NaN);
 
 R_theta = [];
@@ -73,16 +74,20 @@ inBounds = Xq >= 1 & Xq <= W & Yq >= 1 & Yq <= H;
 Ipolar = nan(size(Xq));
 Ipolar(inBounds) = F(Yq(inBounds), Xq(inBounds));
 
-R_theta = nan(1, params.nTheta);
+% Pass 1: collect ALL candidate peaks per ray, don't pick yet.
+nT = params.nTheta;
+candRadii = cell(1, nT);
+candVals  = cell(1, nT);
 
-for j = 1:params.nTheta
+for j = 1:nT
     profile = Ipolar(:, j);
     if all(isnan(profile)) || max(profile, [], 'omitnan') <= 0
         info.nMissing = info.nMissing + 1;
+        candRadii{j} = [];
+        candVals{j}  = [];
         continue;
     end
 
-    % Strongest local maximum in the cortex band. NaN-safe findpeaks.
     profile_clean = profile;
     profile_clean(isnan(profile_clean)) = 0;
     try
@@ -90,28 +95,88 @@ for j = 1:params.nTheta
             'MinPeakHeight',     params.minPeakValue, ...
             'MinPeakProminence', params.minPeakProminence);
     catch
-        pkVals = [];
-        pkLocs = [];
+        pkVals = []; pkLocs = [];
     end
 
-    if ~isempty(pkLocs)
-        [~, iMaxPk] = max(pkVals);
-        R_theta(j) = r(pkLocs(iMaxPk));
-        info.nPeaksFound = info.nPeaksFound + 1;
-    else
-        % Fallback: global max in the search band.
+    if isempty(pkLocs)
+        % Fallback: global max becomes the single candidate.
         [pkVal, pkLoc] = max(profile_clean);
         if pkVal >= params.minPeakValue
-            R_theta(j) = r(pkLoc);
+            candRadii{j} = r(pkLoc);
+            candVals{j}  = pkVal;
             info.nFallback = info.nFallback + 1;
         else
+            candRadii{j} = [];
+            candVals{j}  = [];
             info.nMissing = info.nMissing + 1;
         end
+    else
+        candRadii{j} = r(pkLocs);
+        candVals{j}  = pkVals;
+        info.nPeaksFound = info.nPeaksFound + 1;
+    end
+end
+
+% Pass 2: initial pick = outermost significant peak per ray. Used to
+% seed the continuity refinement; no NaN bridging.
+R_theta = nan(1, nT);
+for j = 1:nT
+    cV = candVals{j};
+    cR = candRadii{j};
+    if isempty(cR); continue; end
+    valid = cV > params.peakKeepFrac * max(cV);
+    if any(valid)
+        R_theta(j) = cR(find(valid, 1, 'last'));
+    else
+        [~, iMax] = max(cV);
+        R_theta(j) = cR(iMax);
+    end
+end
+
+% Pass 3: angular-continuity refinement. For each ray, recompute the
+% pick restricted to candidates within maxJumpPx of the local circular
+% median. Within that band, still prefer the outermost significant
+% peak so polar-body bulges are kept. No NaN, no interpolation: every
+% ray is assigned the radius of an actual candidate peak that exists
+% in its own profile and is consistent with its neighborhood.
+info.nContinuityRevised = 0;
+if isfield(params, 'useAngularContinuity') && params.useAngularContinuity
+    R_pad = [R_theta R_theta R_theta];
+    R_med = smoothdata(R_pad, 'movmedian', params.continuityMedianWin, ...
+                       'includenan');
+    R_med = R_med(nT + 1 : 2*nT);
+    R_med_global = median(R_theta(~isnan(R_theta)), 'omitnan');
+
+    for j = 1:nT
+        cV = candVals{j};
+        cR = candRadii{j};
+        if isempty(cR); continue; end
+
+        R_pred = R_med(j);
+        if isnan(R_pred); R_pred = R_med_global; end
+        if isnan(R_pred); continue; end
+
+        within = abs(cR - R_pred) <= params.maxJumpPx;
+        if ~any(within); continue; end   % keep pass-2 pick
+
+        cR_w = cR(within);
+        cV_w = cV(within);
+        valid = cV_w > params.peakKeepFrac * max(cV_w);
+        if any(valid)
+            newR = cR_w(find(valid, 1, 'last'));
+        else
+            [~, iMax] = max(cV_w);
+            newR = cR_w(iMax);
+        end
+
+        if ~isnan(R_theta(j)) && abs(newR - R_theta(j)) > 0
+            info.nContinuityRevised = info.nContinuityRevised + 1;
+        end
+        R_theta(j) = newR;
     end
 end
 
 % Periodic smoothing — pad with copies, smooth, trim.
-nT = params.nTheta;
 R_ext = [R_theta R_theta R_theta];
 R_ext = smoothdata(R_ext, params.smoothMethod, params.smoothWindow, ...
                    'includenan');
@@ -125,6 +190,15 @@ if any(nanIdx) && any(~nanIdx)
     x_ext = [valIdx - nT, valIdx, valIdx + nT];
     y_ext = [R_theta(valIdx), R_theta(valIdx), R_theta(valIdx)];
     R_theta(nanIdx) = interp1(x_ext, y_ext, nanLocs, 'linear', 'extrap');
+end
+
+% Final low-pass smoothing — Savitzky-Golay preserves the polar body
+% bulge (it's a localized polynomial fit, not a kernel average) while
+% removing per-angle sawtooth oscillations from peak-pick noise.
+if isfield(params, 'sgolayWindow') && params.sgolayWindow > 0
+    R_ext = [R_theta R_theta R_theta];
+    R_ext = smoothdata(R_ext, 'sgolay', params.sgolayWindow);
+    R_theta = R_ext(nT + 1 : 2*nT);
 end
 
 end
