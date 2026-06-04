@@ -157,21 +157,19 @@ fovErodeBorder_um    = 3;      % shrink FOV by this much to skip border halo
 % Otsu fails inconsistently across datasets because the underlying
 % intensity histogram isn't always cleanly bimodal (polar body adds a 3rd
 % class, illumination drift shifts the threshold, etc). When
-% useAdaptiveThreshold = true, the script:
-%   1. CLAHE-normalizes Iseg so each dataset looks the same to the
-%      thresholder (uniform local intensity distribution).
-%   2. Tries adaptiveTryOrder methods in turn. For each, applies the
-%      same morphology cleanup, keeps the largest component, and scores
-%      it against expected oocyte invariants:
-%        - area between adaptiveMinAreaFrac and adaptiveMaxAreaFrac of FOV
-%        - solidity (area / convex hull area) >= adaptiveMinSolidity
-%        - centroid >= adaptiveEdgeMarginFrac of image dim from any edge
-%      First method that passes sanity wins. If none pass, the
-%      highest-scoring candidate is used and the chosen method is
-%      annotated as 'fallback:<method>' for that frame.
-%   3. Logs the winning method per frame and stores it in
-%      results.thresholdMethodByFrame. Frame-1 overlay also includes a
-%      diagnostic figure showing every method's candidate mask.
+% useAdaptiveThreshold = true, the script tries adaptiveTryOrder
+% methods in turn. For each, applies the same morphology cleanup, keeps
+% the largest component, and scores it against expected oocyte
+% invariants:
+%   - area between adaptiveMinAreaFrac and adaptiveMaxAreaFrac of FOV
+%   - solidity (area / convex hull area) >= adaptiveMinSolidity
+%   - centroid >= adaptiveEdgeMarginFrac of image dim from any edge
+% First method that passes sanity wins. If none pass, the
+% highest-scoring candidate is used and the chosen method is annotated
+% as 'fallback:<method>' for that frame. Logs the winning method per
+% frame and stores it in results.thresholdMethodByFrame. Frame-1
+% overlay also includes a diagnostic figure showing every method's
+% candidate mask.
 %
 % Set useAdaptiveThreshold = false to use a single threshold method
 % (thresholdMode parameter above).
@@ -181,9 +179,6 @@ adaptiveMinAreaFrac      = 0.05;   % mask area >= this fraction of fovMask
 adaptiveMaxAreaFrac      = 0.85;   % mask area <= this fraction of fovMask
 adaptiveMinSolidity      = 0.70;   % min area / convex_hull_area
 adaptiveEdgeMarginFrac   = 0.10;   % centroid > this fraction from any image edge
-useCLAHE                 = true;   % CLAHE normalize Iseg before threshold
-claheNumTiles            = [8 8];
-claheClipLimit           = 0.01;
 saveAdaptiveDiagnostic   = true;   % save side-by-side overlay of all methods on frame 1
 
 % --- Active contour: balloon outward instead of contracting inward ---
@@ -488,16 +483,7 @@ for fr = 1:nFrames
         % ---- THRESHOLD + MORPHOLOGY SEED ----
         I_blur = imgaussfilt(Iseg, sigmaBlur);
 
-        % CLAHE pre-normalize so each dataset's intensity distribution
-        % looks the same to the thresholder. If disabled, fall back to
-        % simple max-normalize (legacy behavior).
-        if useCLAHE
-            I_norm = adapthisteq(mat2gray(I_blur), ...
-                                  'NumTiles',  claheNumTiles, ...
-                                  'ClipLimit', claheClipLimit);
-        else
-            I_norm = I_blur / max(I_blur(:));
-        end
+        I_norm = I_blur / max(I_blur(:));
 
         % Build the cascade list. Adaptive mode tries each method in turn
         % and accepts the first sane one. Legacy mode keeps only
@@ -1376,7 +1362,6 @@ results.thresholdMethodByFrame   = thresholdMethodByFrame;
 results.adaptiveScoresByFrame    = adaptiveScoresByFrame;
 results.useAdaptiveThreshold     = useAdaptiveThreshold;
 results.adaptiveTryOrder         = adaptiveTryOrder;
-results.useCLAHE                 = useCLAHE;
 
 save(fullfile(outDir, 'contour_retardance_results.mat'), '-struct', 'results');
 fprintf('Saved results to: %s\n', fullfile(outDir, 'contour_retardance_results.mat'));
