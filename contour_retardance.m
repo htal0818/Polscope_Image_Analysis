@@ -72,7 +72,8 @@ bit_depth = 16;               % image bit depth (16-bit = 0..65535)
 % Heavy blur washes out internal oocyte structure so Otsu finds the gross
 % egg shape. Only used for mask creation — all measurements use raw data.
 sigmaBlur   = 20;      % Gaussian blur sigma (px) for segmentation mask
-closeRadius = 25;      % morphological close disk radius (px)
+openRadius  = 3;       % morphological open disk radius (px) — strips small protrusions
+closeRadius = 25;      % morphological close disk radius (px) — bridges small gaps
 minArea     = 5000;    % minimum object area (px^2) to reject debris
 peakSearchDepth_um = 5;  % max depth (um) along inward normal to search for cortical peak
 
@@ -115,6 +116,54 @@ acSmoothFactor       = 1;      % activecontour regularizer (higher = smoother)
 acGaussSigma         = 2;      % light Gaussian blur before snake (preserves edges)
 forceThresholdEveryN = 0;      % >0: re-seed from threshold every N frames
 
+% --- Re-seeding strategy (breaks frame-to-frame contour drift) ---
+% The snake's per-frame inward bias (regularizer + SE rounding +
+% Chan-Vese intensity partition) accumulates monotonically when each
+% frame is seeded from prevGoodBW. Periodically re-anchor to a fresh
+% threshold-derived mask to break the accumulation.
+%
+%   'prev_only'    : legacy behavior; always seed from prevGoodBW.
+%                    Add scheduled re-seed via forceThresholdEveryN.
+%   'area_change'  : recompute threshold every frame, re-seed when
+%                    nnz(prevGoodBW) and nnz(BW_thresh) differ by
+%                    more than reseedAreaFrac.
+%   'blend'        : recompute threshold every frame, seed from
+%                    (prevGoodBW BLEND_OP BW_thresh) every frame.
+%                    Combines temporal continuity with absolute
+%                    positioning. Default.
+reseedStrategy        = 'blend';       % 'prev_only' | 'area_change' | 'blend'
+reseedAreaFrac        = 0.03;          % area_change mode trigger (fraction)
+blendOp               = 'union_close'; % 'union' | 'union_close' | 'intersect'
+blendCloseRadius_px   = 3;             % SE radius for union_close blend
+
+% --- Radial (polar) boundary detection ---
+% Estimate the cortex boundary by per-angle radial peak search on the
+% retardance image. Each frame is segmented independently from the
+% threshold mask's centroid — no temporal state, no per-frame seed
+% reuse, no drift accumulation. Replaces the snake when enabled.
+%
+% Pipeline:
+%   threshold cascade -> BW_thresh -> centroid (xc, yc) + R0
+%   polar grid over [polarSearchMinFrac, polarSearchMaxFrac] * R0
+%   per angle: findpeaks on Iret radial profile, take strongest local max
+%   smoothdata (movmedian, narrow window — keeps polar body bulge)
+%   poly2mask -> BW
+%
+% Optional mild snake refinement runs after the polar curve if
+% polarRefineIters > 0 (seeded by the polar mask, no drift since
+% iteration count is small).
+useRadialBoundary    = false;
+polarNTheta          = 720;       % angular samples (0.5 deg)
+polarNR              = 400;       % radial samples in the search band
+polarSearchMinFrac   = 0.6;       % inner search bound (fraction of R0)
+polarSearchMaxFrac   = 1.4;       % outer search bound (fraction of R0)
+polarSmoothSigma     = 1.0;       % Gaussian sigma (px) on Iret before sampling
+polarMinPeakValue    = 0.05;      % findpeaks MinPeakHeight (nm)
+polarMinPeakProm     = 0.02;      % findpeaks MinPeakProminence (nm)
+polarSmoothMethod    = 'movmedian';
+polarSmoothWindow    = 7;         % narrow, ~3.5 deg — keeps polar body bulge
+polarRefineIters     = 0;         % >0 = run this many Chan-Vese iters after polar
+
 % --- Mask sanity checks (catastrophic-failure detection only) ---
 % Reject the new mask only on global failures: huge area drop, large
 % centroid jump. Do NOT impose shape/circularity priors — the polar
@@ -143,10 +192,60 @@ haloErode_um         = 2.5;    % erode seed by this many microns before snake
 useTopHatSuppress    = true;   % top-hat removes bright structures smaller than oocyte
 topHatRadius_um      = 6;      % structuring-element radius for top-hat (um)
 
+% --- FOV mask (restricts threshold + snake to the bright imaging region) ---
+% Without this, Otsu locks onto the FOV / dark-border edge (much higher
+% contrast than the oocyte / medium edge inside the FOV) and the snake
+% follows. Pre-detecting the FOV and confining segmentation inside it
+% lets Otsu split oocyte from medium, not FOV from background.
+useFOVMask           = true;
+fovDetectFrac        = 0.05;   % FOV = pixels above this fraction of max(Iseg)
+fovMinFrac           = 0.30;   % FOV must cover >= this fraction of image
+fovErodeBorder_um    = 3;      % shrink FOV by this much to skip border halo
+
+% --- Adaptive threshold cascade (dataset-tolerant Otsu replacement) ---
+% Otsu fails inconsistently across datasets because the underlying
+% intensity histogram isn't always cleanly bimodal (polar body adds a 3rd
+% class, illumination drift shifts the threshold, etc). When
+% useAdaptiveThreshold = true, the script tries adaptiveTryOrder
+% methods in turn. For each, applies the same morphology cleanup, keeps
+% the largest component, and scores it against expected oocyte
+% invariants:
+%   - area between adaptiveMinAreaFrac and adaptiveMaxAreaFrac of FOV
+%   - solidity (area / convex hull area) >= adaptiveMinSolidity
+%   - centroid >= adaptiveEdgeMarginFrac of image dim from any edge
+% First method that passes sanity wins. If none pass, the
+% highest-scoring candidate is used and the chosen method is annotated
+% as 'fallback:<method>' for that frame. Logs the winning method per
+% frame and stores it in results.thresholdMethodByFrame. Frame-1
+% overlay also includes a diagnostic figure showing every method's
+% candidate mask.
+%
+% Set useAdaptiveThreshold = false to use a single threshold method
+% (thresholdMode parameter above).
+useAdaptiveThreshold     = true;
+adaptiveTryOrder         = {'otsu', 'multiotsu', 'percentile', 'gradient'};
+adaptiveMinAreaFrac      = 0.05;   % mask area >= this fraction of fovMask
+adaptiveMaxAreaFrac      = 0.85;   % mask area <= this fraction of fovMask
+adaptiveMinSolidity      = 0.70;   % min area / convex_hull_area
+adaptiveEdgeMarginFrac   = 0.10;   % centroid > this fraction from any image edge
+saveAdaptiveDiagnostic   = true;   % save side-by-side overlay of all methods on frame 1
+
 % --- Active contour: balloon outward instead of contracting inward ---
 % Negative ContractionBias = balloon force. Combined with the eroded seed,
 % the snake expands to the cortex from inside, eliminating inside-out bias.
 acContractionBias    = -0.3;   % was implicitly +0.3 (default 'edge')
+
+% --- Outward bias (post-snake dilation for measurement / display) ---
+% The 'edge' snake on State1-4 sum locks onto the cortex INNER edge (where
+% bright cortex meets dark interior — by far the steepest gradient in the
+% image). We want the contour on the cortex OUTER edge, ~one cortex
+% thickness further out. Apply a fixed dilation AFTER the sanity check and
+% AFTER updating prevGoodBW, so:
+%   - the snake operates in a consistent coordinate system frame-to-frame
+%     (no compounding drift),
+%   - downstream measurement and overlays see the outward-shifted boundary.
+useOutwardBias       = true;
+outwardBias_um       = 2.0;    % shift boundary outward by this many microns
 
 % --- Cortical band from distance transform + depth histogram ---
 % Cut-off located where bin-to-bin median retardance drops most steeply
@@ -335,6 +434,18 @@ cortexCutoff_um  = nan(nFrames, 1);              % per-frame band depth (microns
 cortexMeanRet    = nan(nFrames, 1);              % mean retardance over cortex band (nm)
 cortexBandKymo   = nan(nFrames, nThetaBins);     % per-angle cortex retardance
 
+% --- Adaptive threshold log ---
+thresholdMethodByFrame = repmat({''}, nFrames, 1);   % winner method per frame
+seedReasonByFrame      = repmat({''}, nFrames, 1);   % seed strategy that fired per frame
+
+% --- Radial boundary diagnostics ---
+polarRTheta            = nan(nFrames, polarNTheta);  % R(theta) per frame
+polarNPeaksFound       = zeros(nFrames, 1);
+polarNFallback         = zeros(nFrames, 1);
+polarNMissing          = zeros(nFrames, 1);
+polarFailedFrames      = false(nFrames, 1);
+adaptiveScoresByFrame  = nan(nFrames, 1);            % winning sanity score
+
 %% ========================== MAIN LOOP =====================================
 fprintf('Processing %d frames...\n', nFrames);
 tic;
@@ -393,118 +504,344 @@ for fr = 1:nFrames
         segFromMask = false;
     end
 
-    % Decide whether this frame needs a threshold seed:
-    %   - First frame / no prior mask
-    %   - Scheduled re-seed for drift correction
-    %   - Active contour disabled (legacy mode: threshold every frame)
-    forceReseed     = forceThresholdEveryN > 0 && mod(fr-1, forceThresholdEveryN) == 0;
-    runThresholdSeed = isempty(prevGoodBW) || forceReseed || ~useActiveContour;
-
-    if runThresholdSeed
-        % ---- THRESHOLD + MORPHOLOGY SEED ----
-        I_blur = imgaussfilt(Iseg, sigmaBlur);
-        I_norm = I_blur / max(I_blur(:));
-
-        switch thresholdMode
-            case 'otsu'
-                Totsu = graythresh(I_norm);
-                if segFromMask
-                    BW = I_norm < Totsu;
-                else
-                    BW = I_norm > Totsu;
-                end
-
-            case 'fixed'
-                if segFromMask
-                    BW = I_blur < fixedThreshold;
-                else
-                    BW = I_blur > fixedThreshold;
-                end
-
-            case 'percentile'
-                pVal = prctile(I_blur(:), percentileThreshold);
-                if segFromMask
-                    BW = I_blur < pVal;
-                else
-                    BW = I_blur > pVal;
-                end
-
-            case 'adaptive'
-                nhd = min(adaptNeighborhood, 2*floor(min(size(I_norm))/4)+1);
-                T = adaptthresh(I_norm, adaptSensitivity, ...
-                        'NeighborhoodSize', nhd);
-                BW = imbinarize(I_norm, T);
-                if segFromMask
-                    BW = ~BW;
-                end
-
-            case 'edge'
-                edges = edge(I_norm, edgeMethod);
-                se_edge = strel('disk', edgeDilateRadius);
-                edges = imdilate(edges, se_edge);
-                BW = imfill(edges, 'holes');
-                if segFromMask && sum(BW(:)) > 0.5 * numel(BW)
-                    BW = ~BW;
-                end
-
-            case 'gradient'
-                [Gmag, ~] = imgradient(I_blur);
-                thrG = prctile(Gmag(:), gradientPercentile);
-                BW_edges = Gmag >= thrG;
-                se_edge = strel('disk', edgeDilateRadius);
-                BW_edges = imdilate(BW_edges, se_edge);
-                BW = imfill(BW_edges, 'holes');
-                if segFromMask && sum(BW(:)) > 0.5 * numel(BW)
-                    BW = ~BW;
-                end
-
-            otherwise
-                error('Unknown thresholdMode: %s', thresholdMode);
+    % --- FOV mask: restrict segmentation to inside the bright imaging region ---
+    % Otherwise Otsu locks onto the FOV / dark-border edge.
+    if useFOVMask
+        fovMask = Iseg > fovDetectFrac * max(Iseg(:));
+        fovMask = imfill(fovMask, 'holes');
+        Lf = bwlabel(fovMask, 8);
+        if max(Lf(:)) >= 1
+            Sf = regionprops(Lf, 'Area');
+            [~, iFov] = max([Sf.Area]);
+            fovMask = (Lf == iFov);
         end
-
-        se = strel('disk', closeRadius);
-        BW = imclose(BW, se);
-        BW = imfill(BW, 'holes');
-        BW = bwareaopen(BW, minArea);
-
-        % Bright-patch suppression: top-hat removes blobs smaller than oocyte.
-        if useTopHatSuppress
-            topHatR_px = max(3, round(topHatRadius_um * px_per_um));
-            se_th = strel('disk', topHatR_px);
-            BW = BW & ~imtophat(BW, se_th);
-            BW = imfill(BW, 'holes');
-        end
-
-        % Gradient fallback if threshold yields nothing.
-        if ~any(BW(:))
-            [Gmag, ~] = imgradient(I_blur);
-            thrG = max(2*mean(Gmag(:)), prctile(Gmag(:), 80));
-            BW = Gmag >= thrG;
-            BW = imclose(BW, se);
-            BW = imfill(BW, 'holes');
-            BW = bwareaopen(BW, minArea);
-        end
-
-        L = bwlabel(BW, 8);
-        if max(L(:)) >= 1
-            S = regionprops(L, 'Area');
-            [~, iMax] = max([S.Area]);
-            BW_seed = (L == iMax);
-        elseif ~isempty(prevGoodBW)
-            BW_seed = prevGoodBW;
+        if nnz(fovMask) < fovMinFrac * numel(fovMask)
+            if fr == 1
+                fprintf('  FOV detection found %.0f%% of image (< %.0f%% required); disabling FOV mask.\n', ...
+                        100 * nnz(fovMask) / numel(fovMask), 100 * fovMinFrac);
+            end
+            fovMask = true(size(Iseg));
         else
-            fprintf('  Frame %d: no boundary found, skipping.\n', fr);
-            continue;
+            fovErodePx = max(1, round(fovErodeBorder_um * px_per_um));
+            fovMask = imerode(fovMask, strel('disk', fovErodePx));
         end
-        nThresholdSeeds = nThresholdSeeds + 1;
     else
-        % Seed the snake from the last accepted mask.
-        BW_seed = prevGoodBW;
+        fovMask = true(size(Iseg));
     end
 
-    % Halo erosion: shrink the seed so the balloon snake has room to
-    % expand outward to the true cortex (instead of locking onto the halo).
-    if useHaloErode
+    % Decide whether this frame needs a fresh threshold mask:
+    %   - First frame / no prior mask
+    %   - Scheduled re-seed (forceThresholdEveryN)
+    %   - Active contour disabled (legacy mode: threshold every frame)
+    %   - reseedStrategy is 'area_change' or 'blend' (both need BW_thresh
+    %     every frame to decide / blend against prevGoodBW)
+    forceReseed       = forceThresholdEveryN > 0 && mod(fr-1, forceThresholdEveryN) == 0;
+    needThresholdMask = isempty(prevGoodBW) || forceReseed || ...
+                        ~useActiveContour || ...
+                        any(strcmp(reseedStrategy, {'area_change','blend'}));
+
+    if needThresholdMask
+        % ---- THRESHOLD + MORPHOLOGY SEED ----
+        I_blur = imgaussfilt(Iseg, sigmaBlur);
+
+        % Bright-patch suppression on the intensity image. Subtract the
+        % top-hat (bright structures smaller than topHatRadius_um) from
+        % I_blur so Otsu / multiotsu / percentile / gradient never see
+        % the bright patches in the first place. This is the right place
+        % to do it -- imtophat on a binary mask is just an opening.
+        if useTopHatSuppress
+            topHatR_px = max(3, round(topHatRadius_um * px_per_um));
+            se_th      = strel('disk', topHatR_px);
+            I_blur     = I_blur - imtophat(I_blur, se_th);
+        end
+
+        I_norm = I_blur / max(I_blur(:));
+
+        % Build the cascade list. Adaptive mode tries each method in turn
+        % and accepts the first sane one. Legacy mode keeps only
+        % thresholdMode and skips sanity check (preserves old behavior).
+        if useAdaptiveThreshold
+            methodList = adaptiveTryOrder;
+        else
+            methodList = {thresholdMode};
+        end
+
+        fovArea = max(nnz(fovMask), 1);
+        se_open  = strel('disk', max(1, openRadius));
+        se_close = strel('disk', closeRadius);
+        se_edge  = strel('disk', edgeDilateRadius);
+
+        % Per-method diagnostic storage (frame 1 only).
+        if saveAdaptiveDiagnostic && fr == 1 && useAdaptiveThreshold
+            diagnosticMasks = cell(1, numel(methodList));
+            diagnosticScores = nan(1, numel(methodList));
+        else
+            diagnosticMasks = {};
+            diagnosticScores = [];
+        end
+
+        BW_thresh     = [];
+        methodUsed    = '';
+        winningScore  = -Inf;
+        bestBW        = [];
+        bestMethod    = '';
+
+        for tryIdx = 1:numel(methodList)
+            tm = methodList{tryIdx};
+
+            % Compute candidate binary mask for this method.
+            switch tm
+                case 'otsu'
+                    Totsu = graythresh(I_norm(fovMask));
+                    if segFromMask
+                        BW_try = I_norm < Totsu;
+                    else
+                        BW_try = I_norm > Totsu;
+                    end
+
+                case 'multiotsu'
+                    % Multi-Otsu (2 thresholds, 3 classes). For State sums
+                    % with dark interior, the oocyte sits in the middle
+                    % class (darker than medium, brighter than border).
+                    try
+                        Tm = multithresh(I_norm(fovMask), 2);
+                    catch
+                        continue;   % degenerate histogram, skip
+                    end
+                    if segFromMask
+                        BW_try = I_norm < Tm(2) & I_norm > Tm(1);
+                    else
+                        BW_try = I_norm > Tm(1) & I_norm < Tm(2);
+                    end
+
+                case 'fixed'
+                    if segFromMask
+                        BW_try = I_blur < fixedThreshold;
+                    else
+                        BW_try = I_blur > fixedThreshold;
+                    end
+
+                case 'percentile'
+                    pVal = prctile(I_norm(fovMask), percentileThreshold);
+                    if segFromMask
+                        BW_try = I_norm < pVal;
+                    else
+                        BW_try = I_norm > pVal;
+                    end
+
+                case 'adaptive'
+                    nhd = min(adaptNeighborhood, 2*floor(min(size(I_norm))/4)+1);
+                    Ta = adaptthresh(I_norm, adaptSensitivity, ...
+                                     'NeighborhoodSize', nhd);
+                    BW_try = imbinarize(I_norm, Ta);
+                    if segFromMask
+                        BW_try = ~BW_try;
+                    end
+
+                case 'edge'
+                    edges = edge(I_norm, edgeMethod);
+                    edges = imdilate(edges, se_edge);
+                    BW_try = imfill(edges, 'holes');
+                    if segFromMask && sum(BW_try(:)) > 0.5 * numel(BW_try)
+                        BW_try = ~BW_try;
+                    end
+
+                case 'gradient'
+                    [Gmag, ~] = imgradient(I_blur);
+                    thrG = prctile(Gmag(:), gradientPercentile);
+                    BW_edges = Gmag >= thrG;
+                    BW_edges = imdilate(BW_edges, se_edge);
+                    BW_try = imfill(BW_edges, 'holes');
+                    if segFromMask && sum(BW_try(:)) > 0.5 * numel(BW_try)
+                        BW_try = ~BW_try;
+                    end
+
+                otherwise
+                    error('Unknown thresholdMode in cascade: %s', tm);
+            end
+
+            % Common cleanup for every candidate.
+            % open  -> strip small protrusions (threshold noise on the boundary)
+            % close -> bridge small gaps in the cortex outline
+            % fill  -> close interior voids
+            BW_try = imopen(BW_try, se_open);
+            BW_try = imclose(BW_try, se_close);
+            BW_try = imfill(BW_try, 'holes');
+            BW_try = BW_try & fovMask;
+            BW_try = bwareaopen(BW_try, minArea);
+            % Bright-patch suppression now runs on I_blur above (see
+            % top-of-cascade), so no per-candidate binary top-hat here.
+
+            Lt = bwlabel(BW_try, 8);
+            if max(Lt(:)) < 1
+                if ~isempty(diagnosticMasks)
+                    diagnosticMasks{tryIdx} = false(size(Iseg));
+                    diagnosticScores(tryIdx) = -Inf;
+                end
+                continue;
+            end
+            St = regionprops(Lt, 'Area', 'Solidity', 'Centroid');
+            [~, iMax] = max([St.Area]);
+            BW_try = (Lt == iMax);
+
+            % Sanity invariants.
+            areaFrac    = St(iMax).Area / fovArea;
+            solidity    = St(iMax).Solidity;
+            cx          = St(iMax).Centroid(1);
+            cy          = St(iMax).Centroid(2);
+            edgeMargin  = min([cx, W-cx, cy, H-cy]) / min(H, W);
+
+            passArea  = areaFrac >= adaptiveMinAreaFrac && ...
+                        areaFrac <= adaptiveMaxAreaFrac;
+            passSolid = solidity >= adaptiveMinSolidity;
+            passEdge  = edgeMargin >= adaptiveEdgeMarginFrac;
+            isSane    = passArea && passSolid && passEdge;
+
+            % Fallback score: rewards solidity, central position, and
+            % an area near the middle of the allowed range.
+            midAreaFrac = (adaptiveMinAreaFrac + adaptiveMaxAreaFrac) / 2;
+            score = solidity * edgeMargin * ...
+                    (1 - min(abs(areaFrac - midAreaFrac) / midAreaFrac, 1));
+
+            if ~isempty(diagnosticMasks)
+                diagnosticMasks{tryIdx}  = BW_try;
+                diagnosticScores(tryIdx) = score;
+            end
+
+            if useAdaptiveThreshold && isSane
+                BW_thresh    = BW_try;
+                methodUsed   = tm;
+                winningScore = score;
+                break;
+            elseif ~useAdaptiveThreshold
+                BW_thresh    = BW_try;
+                methodUsed   = tm;
+                winningScore = score;
+                break;
+            elseif score > winningScore
+                bestBW       = BW_try;
+                bestMethod   = tm;
+                winningScore = score;
+            end
+        end
+
+        % If none of the cascade methods passed sanity, use the
+        % highest-scoring candidate and mark it as a fallback.
+        if isempty(BW_thresh)
+            if ~isempty(bestBW)
+                BW_thresh  = bestBW;
+                methodUsed = ['fallback:' bestMethod];
+            elseif ~isempty(prevGoodBW)
+                BW_thresh  = prevGoodBW;
+                methodUsed = 'fallback:prevGood';
+            else
+                fprintf('  Frame %d: no candidate boundary found, skipping.\n', fr);
+                continue;
+            end
+        end
+
+        thresholdMethodByFrame{fr} = methodUsed;
+        adaptiveScoresByFrame(fr)  = winningScore;
+        fprintf('  Frame %d threshold: %-22s (score=%.3f)\n', fr, methodUsed, winningScore);
+
+        % Diagnostic overlay for frame 1: every cascade candidate side-by-side.
+        if ~isempty(diagnosticMasks) && fr == 1 && saveOverlays
+            nMethods = numel(diagnosticMasks);
+            nCols = ceil(sqrt(nMethods));
+            nRows = ceil(nMethods / nCols);
+            figD = figure('Visible', 'off', 'Position', [50 50 360*nCols 320*nRows]);
+            for di = 1:nMethods
+                subplot(nRows, nCols, di);
+                imagesc(Iseg); colormap gray; axis image; hold on;
+                bdy = bwboundaries(diagnosticMasks{di});
+                for bi = 1:numel(bdy)
+                    plot(bdy{bi}(:,2), bdy{bi}(:,1), 'r-', 'LineWidth', 1);
+                end
+                tag = methodList{di};
+                if strcmp(tag, methodUsed) || strcmp(['fallback:' tag], methodUsed)
+                    tag = ['[picked] ' tag];
+                end
+                title(sprintf('%s   score=%.3f', tag, diagnosticScores(di)), ...
+                      'Interpreter', 'none', 'FontSize', 9);
+                set(gca, 'XTick', [], 'YTick', []);
+            end
+            exportgraphics(figD, fullfile(overlayDir, 'adaptive_threshold_methods_frame1.png'), ...
+                           'Resolution', 200);
+            close(figD);
+        end
+
+        nThresholdSeeds = nThresholdSeeds + 1;
+    else
+        BW_thresh = [];
+    end
+
+    % ---- DECIDE WHAT TO FEED THE SNAKE ----
+    if isempty(prevGoodBW)
+        BW_seed    = BW_thresh;             % frame 1
+        seedReason = 'frame1';
+    elseif forceReseed
+        BW_seed    = BW_thresh;             % scheduled hard reset
+        seedReason = 'scheduled';
+    else
+        switch reseedStrategy
+            case 'prev_only'
+                BW_seed    = prevGoodBW;
+                seedReason = 'prev';
+
+            case 'area_change'
+                areaPrev   = nnz(prevGoodBW);
+                areaThresh = nnz(BW_thresh);
+                fracChange = abs(areaPrev - areaThresh) / max(areaThresh, 1);
+                if fracChange > reseedAreaFrac
+                    BW_seed    = BW_thresh;
+                    seedReason = sprintf('area_change %.2f%%', 100*fracChange);
+                else
+                    BW_seed    = prevGoodBW;
+                    seedReason = 'prev';
+                end
+
+            case 'blend'
+                switch blendOp
+                    case 'union'
+                        BW_seed = prevGoodBW | BW_thresh;
+                    case 'union_close'
+                        BW_seed = imclose(prevGoodBW | BW_thresh, ...
+                                          strel('disk', blendCloseRadius_px));
+                    case 'intersect'
+                        BW_seed = prevGoodBW & BW_thresh;
+                    otherwise
+                        error('Unknown blendOp: %s', blendOp);
+                end
+                BW_seed = BW_seed & fovMask;
+                BW_seed = bwareaopen(BW_seed, minArea);
+                % Keep largest component after blend (union can attach noise).
+                Lb = bwlabel(BW_seed, 8);
+                if max(Lb(:)) >= 1
+                    Sb = regionprops(Lb, 'Area');
+                    [~, iMaxBlend] = max([Sb.Area]);
+                    BW_seed = (Lb == iMaxBlend);
+                end
+                if ~any(BW_seed(:))
+                    BW_seed = prevGoodBW;   % blend ate everything, fall back
+                end
+                seedReason = ['blend_' blendOp];
+
+            otherwise
+                error('Unknown reseedStrategy: %s', reseedStrategy);
+        end
+    end
+
+    seedReasonByFrame{fr} = seedReason;
+
+    % Halo erosion: shrink the threshold-derived seed so the balloon snake
+    % has room to expand outward to the true cortex (instead of locking
+    % onto the halo). Only applied when the seed actually came from a
+    % fresh threshold — never on prev_only or blend frames, where it
+    % would compound drift / shrink the blended union.
+    seedFromThreshold = strcmp(seedReason, 'frame1') || ...
+                        strcmp(seedReason, 'scheduled') || ...
+                        startsWith(seedReason, 'area_change');
+    if useHaloErode && seedFromThreshold
         erodeR_px = max(1, round(haloErode_um * px_per_um));
         BW_seed_eroded = imerode(BW_seed, strel('disk', erodeR_px));
         if any(BW_seed_eroded(:))
@@ -512,15 +849,64 @@ for fr = 1:nFrames
         end
     end
 
-    % ---- ACTIVE CONTOUR REFINEMENT ----
-    % Snake deforms locally to track real boundary changes (polar body
-    % extrusion, cortical protrusions). No circularity prior.
-    if useActiveContour
+    % ---- BOUNDARY REFINEMENT: polar radial peak search OR snake ----
+    if useRadialBoundary
+        polarParams = struct(...
+            'nTheta',              polarNTheta, ...
+            'nR',                  polarNR, ...
+            'cortexSearchMinFrac', polarSearchMinFrac, ...
+            'cortexSearchMaxFrac', polarSearchMaxFrac, ...
+            'smoothSigma',         polarSmoothSigma, ...
+            'minPeakValue',        polarMinPeakValue, ...
+            'minPeakProminence',   polarMinPeakProm, ...
+            'smoothMethod',        polarSmoothMethod, ...
+            'smoothWindow',        polarSmoothWindow);
+
+        [R_theta, xc_p, yc_p, info] = polar_cortex_boundary( ...
+            Iret, BW_thresh, polarParams);
+
+        if isempty(R_theta) || all(isnan(R_theta))
+            % Polar method failed (e.g. empty BW_thresh) — fall back
+            polarFailedFrames(fr) = true;
+            BW_new = BW_thresh;
+            if isempty(BW_new) && ~isempty(prevGoodBW)
+                BW_new = prevGoodBW;
+            end
+            fprintf('  Frame %d: polar boundary failed, fell back.\n', fr);
+        else
+            polarRTheta(fr, :)      = R_theta;
+            polarNPeaksFound(fr)    = info.nPeaksFound;
+            polarNFallback(fr)      = info.nFallback;
+            polarNMissing(fr)       = info.nMissing;
+
+            theta_eval = linspace(0, 2*pi, polarNTheta + 1);
+            theta_eval(end) = [];
+            polyXq = xc_p + R_theta .* cos(theta_eval);
+            polyYq = yc_p + R_theta .* sin(theta_eval);
+            BW_new = poly2mask(polyXq, polyYq, H, W);
+            BW_new = BW_new & fovMask;
+            BW_new = bwareaopen(BW_new, minArea);
+
+            % Optional mild Chan-Vese cleanup on top of the polar curve.
+            if polarRefineIters > 0
+                I_snake = mat2gray(imgaussfilt(Iret, acGaussSigma));
+                BW_new = activecontour(I_snake, BW_new, polarRefineIters, ...
+                                       'Chan-Vese', ...
+                                       'SmoothFactor', acSmoothFactor, ...
+                                       'ContractionBias', 0);
+                BW_new = imfill(BW_new, 'holes');
+                BW_new = BW_new & fovMask;
+                BW_new = bwareaopen(BW_new, minArea);
+            end
+        end
+
+    elseif useActiveContour
         I_snake = mat2gray(imgaussfilt(Iseg, acGaussSigma));
         BW_new  = activecontour(I_snake, BW_seed, acIterations, acMethod, ...
                                 'SmoothFactor',    acSmoothFactor, ...
                                 'ContractionBias', acContractionBias);
         BW_new = imfill(BW_new, 'holes');
+        BW_new = BW_new & fovMask;
         BW_new = bwareaopen(BW_new, minArea);
 
         Ln = bwlabel(BW_new, 8);
@@ -529,7 +915,7 @@ for fr = 1:nFrames
             [~, iMax] = max([Sn.Area]);
             BW_new = (Ln == iMax);
         else
-            BW_new = BW_seed;   % snake collapsed — fall back to seed
+            BW_new = BW_seed;
         end
     else
         BW_new = BW_seed;
@@ -573,6 +959,17 @@ for fr = 1:nFrames
         nMaskAccepted    = nMaskAccepted + 1;
     end
 
+    % Post-snake outward dilation: shift the measurement boundary onto
+    % the cortex outer edge. prevGoodBW above is the un-dilated snake
+    % output, so the next frame's seed is consistent (no compounding).
+    if useOutwardBias && outwardBias_um > 0
+        dilateR_px = max(1, round(outwardBias_um * px_per_um));
+        % Exact-Euclidean dilation. strel('disk', r) defaults to an
+        % octagonal SE approximation that prints scalloped bumps around
+        % the perimeter; bwdist <= r gives a smooth circular dilation.
+        BW = bwdist(BW) <= dilateR_px;
+    end
+
     %% ----- Extract boundary contour -----
     B = bwboundaries(BW);
     if isempty(B)
@@ -614,7 +1011,7 @@ for fr = 1:nFrames
         inBounds = xs >= 1 & xs <= W & ys >= 1 & ys <= H;
 
         if any(inBounds)
-            vals = F(ys(inBounds), xs(inBounds));
+            vals = F(ys(inBounds).', xs(inBounds).');
             profile_sum(inBounds)   = profile_sum(inBounds)   + vals(:)';
             profile_count(inBounds) = profile_count(inBounds) + 1;
         end
@@ -654,8 +1051,8 @@ for fr = 1:nFrames
     % Sub-pixel interpolation of gradient at each smooth boundary point
     F_Gx = griddedInterpolant({1:H, 1:W}, Gx, 'linear', 'nearest');
     F_Gy = griddedInterpolant({1:H, 1:W}, Gy, 'linear', 'nearest');
-    nx = -F_Gx(polyY, polyX);   % inward = negative gradient (gradient points outward)
-    ny = -F_Gy(polyY, polyX);
+    nx = -F_Gx(polyY.', polyX.').';   % inward = negative gradient (gradient points outward)
+    ny = -F_Gy(polyY.', polyX.').';
     nmag = sqrt(nx.^2 + ny.^2) + eps;
     nx = nx ./ nmag;
     ny = ny ./ nmag;
@@ -681,14 +1078,14 @@ for fr = 1:nFrames
 
         inBounds = xs_n >= 1 & xs_n <= W & ys_n >= 1 & ys_n <= H;
         if any(inBounds)
-            vals = F(ys_n(inBounds), xs_n(inBounds));
+            vals = F(ys_n(inBounds).', xs_n(inBounds).');
             normal_sum(inBounds)   = normal_sum(inBounds)   + vals(:)';
             normal_count(inBounds) = normal_count(inBounds) + 1;
 
             % Find peak retardance within search window
             searchIdx = intersect(peakSearchIdx, find(inBounds));
             if ~isempty(searchIdx)
-                searchVals = F(ys_n(searchIdx), xs_n(searchIdx));
+                searchVals = F(ys_n(searchIdx).', xs_n(searchIdx).');
                 [peakRetardance(bi), pidx] = max(searchVals);
                 peakDepth_um(bi) = depthAxis_um(searchIdx(pidx));
             end
@@ -782,7 +1179,7 @@ for fr = 1:nFrames
     retC   = Iret(cortexBandMask);
     keepC  = ~isnan(binPxC);
     if any(keepC)
-        cortexBandKymo(fr, :) = accumarray(binPxC(keepC).', retC(keepC).', ...
+        cortexBandKymo(fr, :) = accumarray(binPxC(keepC), retC(keepC), ...
                                             [nThetaBins 1], @nanmean, NaN).';
     end
 
@@ -1125,6 +1522,7 @@ results.nBoundaryPts          = nBoundaryPts;
 results.maxDepth_um           = maxDepth_um;
 results.depthStep_um          = depthStep_um;
 results.sigmaBlur             = sigmaBlur;
+results.openRadius            = openRadius;
 results.closeRadius           = closeRadius;
 results.minArea               = minArea;
 results.peakSearchDepth_um    = peakSearchDepth_um;
@@ -1142,7 +1540,26 @@ results.useHaloErode          = useHaloErode;
 results.useTopHatSuppress     = useTopHatSuppress;
 results.useHistDepthCutoff    = useHistDepthCutoff;
 results.histMinCutoff_um      = histMinCutoff_um;
-results.histMaxCutoff_um      = histMaxCutoff_um;
+results.histMaxCutoff_um         = histMaxCutoff_um;
+results.thresholdMethodByFrame   = thresholdMethodByFrame;
+results.adaptiveScoresByFrame    = adaptiveScoresByFrame;
+results.useAdaptiveThreshold     = useAdaptiveThreshold;
+results.adaptiveTryOrder         = adaptiveTryOrder;
+results.seedReasonByFrame        = seedReasonByFrame;
+results.reseedStrategy           = reseedStrategy;
+results.reseedAreaFrac           = reseedAreaFrac;
+results.blendOp                  = blendOp;
+results.blendCloseRadius_px      = blendCloseRadius_px;
+results.useRadialBoundary        = useRadialBoundary;
+results.polarRTheta              = polarRTheta;
+results.polarNPeaksFound         = polarNPeaksFound;
+results.polarNFallback           = polarNFallback;
+results.polarNMissing            = polarNMissing;
+results.polarFailedFrames        = polarFailedFrames;
+results.polarNTheta              = polarNTheta;
+results.polarSearchMinFrac       = polarSearchMinFrac;
+results.polarSearchMaxFrac       = polarSearchMaxFrac;
+results.polarSmoothWindow        = polarSmoothWindow;
 
 save(fullfile(outDir, 'contour_retardance_results.mat'), '-struct', 'results');
 fprintf('Saved results to: %s\n', fullfile(outDir, 'contour_retardance_results.mat'));
