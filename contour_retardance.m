@@ -115,6 +115,26 @@ acSmoothFactor       = 1;      % activecontour regularizer (higher = smoother)
 acGaussSigma         = 2;      % light Gaussian blur before snake (preserves edges)
 forceThresholdEveryN = 0;      % >0: re-seed from threshold every N frames
 
+% --- Re-seeding strategy (breaks frame-to-frame contour drift) ---
+% The snake's per-frame inward bias (regularizer + SE rounding +
+% Chan-Vese intensity partition) accumulates monotonically when each
+% frame is seeded from prevGoodBW. Periodically re-anchor to a fresh
+% threshold-derived mask to break the accumulation.
+%
+%   'prev_only'    : legacy behavior; always seed from prevGoodBW.
+%                    Add scheduled re-seed via forceThresholdEveryN.
+%   'area_change'  : recompute threshold every frame, re-seed when
+%                    nnz(prevGoodBW) and nnz(BW_thresh) differ by
+%                    more than reseedAreaFrac.
+%   'blend'        : recompute threshold every frame, seed from
+%                    (prevGoodBW BLEND_OP BW_thresh) every frame.
+%                    Combines temporal continuity with absolute
+%                    positioning. Default.
+reseedStrategy        = 'blend';       % 'prev_only' | 'area_change' | 'blend'
+reseedAreaFrac        = 0.03;          % area_change mode trigger (fraction)
+blendOp               = 'union_close'; % 'union' | 'union_close' | 'intersect'
+blendCloseRadius_px   = 3;             % SE radius for union_close blend
+
 % --- Mask sanity checks (catastrophic-failure detection only) ---
 % Reject the new mask only on global failures: huge area drop, large
 % centroid jump. Do NOT impose shape/circularity priors — the polar
@@ -387,6 +407,7 @@ cortexBandKymo   = nan(nFrames, nThetaBins);     % per-angle cortex retardance
 
 % --- Adaptive threshold log ---
 thresholdMethodByFrame = repmat({''}, nFrames, 1);   % winner method per frame
+seedReasonByFrame      = repmat({''}, nFrames, 1);   % seed strategy that fired per frame
 adaptiveScoresByFrame  = nan(nFrames, 1);            % winning sanity score
 
 %% ========================== MAIN LOOP =====================================
@@ -472,14 +493,18 @@ for fr = 1:nFrames
         fovMask = true(size(Iseg));
     end
 
-    % Decide whether this frame needs a threshold seed:
+    % Decide whether this frame needs a fresh threshold mask:
     %   - First frame / no prior mask
-    %   - Scheduled re-seed for drift correction
+    %   - Scheduled re-seed (forceThresholdEveryN)
     %   - Active contour disabled (legacy mode: threshold every frame)
-    forceReseed     = forceThresholdEveryN > 0 && mod(fr-1, forceThresholdEveryN) == 0;
-    runThresholdSeed = isempty(prevGoodBW) || forceReseed || ~useActiveContour;
+    %   - reseedStrategy is 'area_change' or 'blend' (both need BW_thresh
+    %     every frame to decide / blend against prevGoodBW)
+    forceReseed       = forceThresholdEveryN > 0 && mod(fr-1, forceThresholdEveryN) == 0;
+    needThresholdMask = isempty(prevGoodBW) || forceReseed || ...
+                        ~useActiveContour || ...
+                        any(strcmp(reseedStrategy, {'area_change','blend'}));
 
-    if runThresholdSeed
+    if needThresholdMask
         % ---- THRESHOLD + MORPHOLOGY SEED ----
         I_blur = imgaussfilt(Iseg, sigmaBlur);
 
@@ -509,7 +534,7 @@ for fr = 1:nFrames
             diagnosticScores = [];
         end
 
-        BW_seed       = [];
+        BW_thresh     = [];
         methodUsed    = '';
         winningScore  = -Inf;
         bestBW        = [];
@@ -636,12 +661,12 @@ for fr = 1:nFrames
             end
 
             if useAdaptiveThreshold && isSane
-                BW_seed      = BW_try;
+                BW_thresh    = BW_try;
                 methodUsed   = tm;
                 winningScore = score;
                 break;
             elseif ~useAdaptiveThreshold
-                BW_seed      = BW_try;
+                BW_thresh    = BW_try;
                 methodUsed   = tm;
                 winningScore = score;
                 break;
@@ -654,12 +679,12 @@ for fr = 1:nFrames
 
         % If none of the cascade methods passed sanity, use the
         % highest-scoring candidate and mark it as a fallback.
-        if isempty(BW_seed)
+        if isempty(BW_thresh)
             if ~isempty(bestBW)
-                BW_seed    = bestBW;
+                BW_thresh  = bestBW;
                 methodUsed = ['fallback:' bestMethod];
             elseif ~isempty(prevGoodBW)
-                BW_seed    = prevGoodBW;
+                BW_thresh  = prevGoodBW;
                 methodUsed = 'fallback:prevGood';
             else
                 fprintf('  Frame %d: no candidate boundary found, skipping.\n', fr);
@@ -699,15 +724,76 @@ for fr = 1:nFrames
 
         nThresholdSeeds = nThresholdSeeds + 1;
     else
-        % Seed the snake from the last accepted mask.
-        BW_seed = prevGoodBW;
+        BW_thresh = [];
     end
+
+    % ---- DECIDE WHAT TO FEED THE SNAKE ----
+    if isempty(prevGoodBW)
+        BW_seed    = BW_thresh;             % frame 1
+        seedReason = 'frame1';
+    elseif forceReseed
+        BW_seed    = BW_thresh;             % scheduled hard reset
+        seedReason = 'scheduled';
+    else
+        switch reseedStrategy
+            case 'prev_only'
+                BW_seed    = prevGoodBW;
+                seedReason = 'prev';
+
+            case 'area_change'
+                areaPrev   = nnz(prevGoodBW);
+                areaThresh = nnz(BW_thresh);
+                fracChange = abs(areaPrev - areaThresh) / max(areaThresh, 1);
+                if fracChange > reseedAreaFrac
+                    BW_seed    = BW_thresh;
+                    seedReason = sprintf('area_change %.2f%%', 100*fracChange);
+                else
+                    BW_seed    = prevGoodBW;
+                    seedReason = 'prev';
+                end
+
+            case 'blend'
+                switch blendOp
+                    case 'union'
+                        BW_seed = prevGoodBW | BW_thresh;
+                    case 'union_close'
+                        BW_seed = imclose(prevGoodBW | BW_thresh, ...
+                                          strel('disk', blendCloseRadius_px));
+                    case 'intersect'
+                        BW_seed = prevGoodBW & BW_thresh;
+                    otherwise
+                        error('Unknown blendOp: %s', blendOp);
+                end
+                BW_seed = BW_seed & fovMask;
+                BW_seed = bwareaopen(BW_seed, minArea);
+                % Keep largest component after blend (union can attach noise).
+                Lb = bwlabel(BW_seed, 8);
+                if max(Lb(:)) >= 1
+                    Sb = regionprops(Lb, 'Area');
+                    [~, iMaxBlend] = max([Sb.Area]);
+                    BW_seed = (Lb == iMaxBlend);
+                end
+                if ~any(BW_seed(:))
+                    BW_seed = prevGoodBW;   % blend ate everything, fall back
+                end
+                seedReason = ['blend_' blendOp];
+
+            otherwise
+                error('Unknown reseedStrategy: %s', reseedStrategy);
+        end
+    end
+
+    seedReasonByFrame{fr} = seedReason;
 
     % Halo erosion: shrink the threshold-derived seed so the balloon snake
     % has room to expand outward to the true cortex (instead of locking
-    % onto the halo). Only applied on threshold-seed frames — re-eroding
-    % the previous accepted mask compounds inward drift per frame.
-    if useHaloErode && runThresholdSeed
+    % onto the halo). Only applied when the seed actually came from a
+    % fresh threshold — never on prev_only or blend frames, where it
+    % would compound drift / shrink the blended union.
+    seedFromThreshold = strcmp(seedReason, 'frame1') || ...
+                        strcmp(seedReason, 'scheduled') || ...
+                        startsWith(seedReason, 'area_change');
+    if useHaloErode && seedFromThreshold
         erodeR_px = max(1, round(haloErode_um * px_per_um));
         BW_seed_eroded = imerode(BW_seed, strel('disk', erodeR_px));
         if any(BW_seed_eroded(:))
@@ -1362,6 +1448,11 @@ results.thresholdMethodByFrame   = thresholdMethodByFrame;
 results.adaptiveScoresByFrame    = adaptiveScoresByFrame;
 results.useAdaptiveThreshold     = useAdaptiveThreshold;
 results.adaptiveTryOrder         = adaptiveTryOrder;
+results.seedReasonByFrame        = seedReasonByFrame;
+results.reseedStrategy           = reseedStrategy;
+results.reseedAreaFrac           = reseedAreaFrac;
+results.blendOp                  = blendOp;
+results.blendCloseRadius_px      = blendCloseRadius_px;
 
 save(fullfile(outDir, 'contour_retardance_results.mat'), '-struct', 'results');
 fprintf('Saved results to: %s\n', fullfile(outDir, 'contour_retardance_results.mat'));
