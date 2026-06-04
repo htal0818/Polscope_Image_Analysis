@@ -143,6 +143,16 @@ haloErode_um         = 2.5;    % erode seed by this many microns before snake
 useTopHatSuppress    = true;   % top-hat removes bright structures smaller than oocyte
 topHatRadius_um      = 6;      % structuring-element radius for top-hat (um)
 
+% --- FOV mask (restricts threshold + snake to the bright imaging region) ---
+% Without this, Otsu locks onto the FOV / dark-border edge (much higher
+% contrast than the oocyte / medium edge inside the FOV) and the snake
+% follows. Pre-detecting the FOV and confining segmentation inside it
+% lets Otsu split oocyte from medium, not FOV from background.
+useFOVMask           = true;
+fovDetectFrac        = 0.05;   % FOV = pixels above this fraction of max(Iseg)
+fovMinFrac           = 0.30;   % FOV must cover >= this fraction of image
+fovErodeBorder_um    = 3;      % shrink FOV by this much to skip border halo
+
 % --- Active contour: balloon outward instead of contracting inward ---
 % Negative ContractionBias = balloon force. Combined with the eroded seed,
 % the snake expands to the cortex from inside, eliminating inside-out bias.
@@ -393,6 +403,31 @@ for fr = 1:nFrames
         segFromMask = false;
     end
 
+    % --- FOV mask: restrict segmentation to inside the bright imaging region ---
+    % Otherwise Otsu locks onto the FOV / dark-border edge.
+    if useFOVMask
+        fovMask = Iseg > fovDetectFrac * max(Iseg(:));
+        fovMask = imfill(fovMask, 'holes');
+        Lf = bwlabel(fovMask, 8);
+        if max(Lf(:)) >= 1
+            Sf = regionprops(Lf, 'Area');
+            [~, iFov] = max([Sf.Area]);
+            fovMask = (Lf == iFov);
+        end
+        if nnz(fovMask) < fovMinFrac * numel(fovMask)
+            if fr == 1
+                fprintf('  FOV detection found %.0f%% of image (< %.0f%% required); disabling FOV mask.\n', ...
+                        100 * nnz(fovMask) / numel(fovMask), 100 * fovMinFrac);
+            end
+            fovMask = true(size(Iseg));
+        else
+            fovErodePx = max(1, round(fovErodeBorder_um * px_per_um));
+            fovMask = imerode(fovMask, strel('disk', fovErodePx));
+        end
+    else
+        fovMask = true(size(Iseg));
+    end
+
     % Decide whether this frame needs a threshold seed:
     %   - First frame / no prior mask
     %   - Scheduled re-seed for drift correction
@@ -407,7 +442,9 @@ for fr = 1:nFrames
 
         switch thresholdMode
             case 'otsu'
-                Totsu = graythresh(I_norm);
+                % Compute Otsu threshold only on pixels inside the FOV so
+                % the FOV / black-border contrast doesn't dominate the split.
+                Totsu = graythresh(I_norm(fovMask));
                 if segFromMask
                     BW = I_norm < Totsu;
                 else
@@ -465,6 +502,7 @@ for fr = 1:nFrames
         se = strel('disk', closeRadius);
         BW = imclose(BW, se);
         BW = imfill(BW, 'holes');
+        BW = BW & fovMask;          % confine threshold to imaging FOV
         BW = bwareaopen(BW, minArea);
 
         % Bright-patch suppression: top-hat removes blobs smaller than oocyte.
@@ -521,6 +559,7 @@ for fr = 1:nFrames
                                 'SmoothFactor',    acSmoothFactor, ...
                                 'ContractionBias', acContractionBias);
         BW_new = imfill(BW_new, 'holes');
+        BW_new = BW_new & fovMask;   % keep snake inside the imaging FOV
         BW_new = bwareaopen(BW_new, minArea);
 
         Ln = bwlabel(BW_new, 8);
