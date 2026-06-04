@@ -631,7 +631,10 @@ for fr = 1:nFrames
     % output, so the next frame's seed is consistent (no compounding).
     if useOutwardBias && outwardBias_um > 0
         dilateR_px = max(1, round(outwardBias_um * px_per_um));
-        BW = imdilate(BW, strel('disk', dilateR_px));
+        % Exact-Euclidean dilation. strel('disk', r) defaults to an
+        % octagonal SE approximation that prints scalloped bumps around
+        % the perimeter; bwdist <= r gives a smooth circular dilation.
+        BW = bwdist(BW) <= dilateR_px;
     end
 
     %% ----- Extract boundary contour -----
