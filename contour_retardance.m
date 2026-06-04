@@ -678,7 +678,7 @@ for fr = 1:nFrames
         inBounds = xs >= 1 & xs <= W & ys >= 1 & ys <= H;
 
         if any(inBounds)
-            vals = F(ys(inBounds), xs(inBounds));
+            vals = F(ys(inBounds).', xs(inBounds).');
             profile_sum(inBounds)   = profile_sum(inBounds)   + vals(:)';
             profile_count(inBounds) = profile_count(inBounds) + 1;
         end
@@ -718,8 +718,8 @@ for fr = 1:nFrames
     % Sub-pixel interpolation of gradient at each smooth boundary point
     F_Gx = griddedInterpolant({1:H, 1:W}, Gx, 'linear', 'nearest');
     F_Gy = griddedInterpolant({1:H, 1:W}, Gy, 'linear', 'nearest');
-    nx = -F_Gx(polyY, polyX);   % inward = negative gradient (gradient points outward)
-    ny = -F_Gy(polyY, polyX);
+    nx = -F_Gx(polyY.', polyX.').';   % inward = negative gradient (gradient points outward)
+    ny = -F_Gy(polyY.', polyX.').';
     nmag = sqrt(nx.^2 + ny.^2) + eps;
     nx = nx ./ nmag;
     ny = ny ./ nmag;
@@ -745,14 +745,14 @@ for fr = 1:nFrames
 
         inBounds = xs_n >= 1 & xs_n <= W & ys_n >= 1 & ys_n <= H;
         if any(inBounds)
-            vals = F(ys_n(inBounds), xs_n(inBounds));
+            vals = F(ys_n(inBounds).', xs_n(inBounds).');
             normal_sum(inBounds)   = normal_sum(inBounds)   + vals(:)';
             normal_count(inBounds) = normal_count(inBounds) + 1;
 
             % Find peak retardance within search window
             searchIdx = intersect(peakSearchIdx, find(inBounds));
             if ~isempty(searchIdx)
-                searchVals = F(ys_n(searchIdx), xs_n(searchIdx));
+                searchVals = F(ys_n(searchIdx).', xs_n(searchIdx).');
                 [peakRetardance(bi), pidx] = max(searchVals);
                 peakDepth_um(bi) = depthAxis_um(searchIdx(pidx));
             end
