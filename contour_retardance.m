@@ -164,16 +164,19 @@ polarPeakKeepFrac    = 0.15;      % outermost peak must be >= this * max(pkVals)
 polarSmoothMethod    = 'movmedian';
 polarSmoothWindow    = 7;         % narrow median, ~3.5 deg — keeps polar body bulge
 polarSgolayWindow    = 11;        % sgolay window after NaN fill; 0 disables
-% Outlier rejection: rays that pick a peak deviating > polarOutlierThreshPx
-% from the local angular median (computed over polarOutlierMedianWin
-% neighbors) are set to NaN before smoothing. The existing NaN-fill step
-% then bridges them via circular interp1. Catches isolated single-ray
-% spikes from per-angle peak-pick failures (e.g. one ray locking onto
-% a bright internal noise speck) without affecting smooth biological
-% deviations like polar body bulges (which span many neighboring rays).
-polarOutlierMedianWin = 11;       % angular samples for local median (~5.5 deg)
-polarOutlierThreshPx  = 5;        % px deviation from local median = outlier; 0 disables
-polarRefineIters     = 0;         % >0 = run this many Chan-Vese iters after polar
+% Angular continuity refinement (constrained peak selection):
+%   Pass 1 collects ALL candidate peaks per ray (no picking yet).
+%   Pass 2 picks the outermost significant peak per ray (seed).
+%   Pass 3 restricts each ray's pick to candidates within polarMaxJumpPx
+%   of the local circular median (over polarContinuityMedianWin angles),
+%   then chooses the outermost significant peak inside that band.
+% Every ray ends up assigned to an actual peak in its own profile that
+% is consistent with its neighborhood -- no NaN bridging, no interpolation
+% repair. Catches both single-ray spikes and multi-ray ridge-switching.
+useAngularContinuity     = true;
+polarContinuityMedianWin = 11;     % angular samples for local median (~5.5 deg)
+polarMaxJumpPx           = 20;     % candidates within this many px of R_pred survive
+polarRefineIters         = 0;      % >0 = run this many Chan-Vese iters after polar
 
 % --- Mask sanity checks (catastrophic-failure detection only) ---
 % Reject the new mask only on global failures: huge area drop, large
@@ -454,7 +457,7 @@ polarRTheta            = nan(nFrames, polarNTheta);  % R(theta) per frame
 polarNPeaksFound       = zeros(nFrames, 1);
 polarNFallback         = zeros(nFrames, 1);
 polarNMissing          = zeros(nFrames, 1);
-polarNOutlierRejected  = zeros(nFrames, 1);
+polarNContinuityRevised = zeros(nFrames, 1);
 polarFailedFrames      = false(nFrames, 1);
 adaptiveScoresByFrame  = nan(nFrames, 1);            % winning sanity score
 
@@ -874,9 +877,10 @@ for fr = 1:nFrames
             'peakKeepFrac',        polarPeakKeepFrac, ...
             'smoothMethod',        polarSmoothMethod, ...
             'smoothWindow',        polarSmoothWindow, ...
-            'sgolayWindow',        polarSgolayWindow, ...
-            'outlierMedianWin',    polarOutlierMedianWin, ...
-            'outlierThreshPx',     polarOutlierThreshPx);
+            'sgolayWindow',         polarSgolayWindow, ...
+            'useAngularContinuity', useAngularContinuity, ...
+            'continuityMedianWin',  polarContinuityMedianWin, ...
+            'maxJumpPx',            polarMaxJumpPx);
 
         [R_theta, xc_p, yc_p, info] = polar_cortex_boundary( ...
             Iret, BW_thresh, polarParams);
@@ -894,7 +898,7 @@ for fr = 1:nFrames
             polarNPeaksFound(fr)    = info.nPeaksFound;
             polarNFallback(fr)         = info.nFallback;
             polarNMissing(fr)          = info.nMissing;
-            polarNOutlierRejected(fr)  = info.nOutlierRejected;
+            polarNContinuityRevised(fr) = info.nContinuityRevised;
 
             theta_eval = linspace(0, 2*pi, polarNTheta + 1);
             theta_eval(end) = [];
@@ -1572,7 +1576,10 @@ results.polarRTheta              = polarRTheta;
 results.polarNPeaksFound         = polarNPeaksFound;
 results.polarNFallback           = polarNFallback;
 results.polarNMissing            = polarNMissing;
-results.polarNOutlierRejected    = polarNOutlierRejected;
+results.polarNContinuityRevised  = polarNContinuityRevised;
+results.useAngularContinuity     = useAngularContinuity;
+results.polarMaxJumpPx           = polarMaxJumpPx;
+results.polarContinuityMedianWin = polarContinuityMedianWin;
 results.polarFailedFrames        = polarFailedFrames;
 results.polarNTheta              = polarNTheta;
 results.polarSearchMinFrac       = polarSearchMinFrac;
