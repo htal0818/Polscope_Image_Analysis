@@ -277,9 +277,10 @@ histMaxCutoff_um     = 6.0;    % clamp cut-off to at most this  (microns)
 nThetaBins = 100;      % number of angular bins around contour
 
 % --- Output ---
-% Output directory: defaults to a subfolder next to this script.
-% Change outDir to save results elsewhere (e.g. fullfile(base_dir, 'contour_retardance_out')).
-outDir = fullfile(fileparts(mfilename('fullpath')), 'contour_retardance_out');
+% Output directory: defaults to a subfolder inside base_dir (next to
+% the input data). Change to fullfile(fileparts(mfilename('fullpath')),
+% 'contour_retardance_out') to save next to the script instead.
+outDir = fullfile(base_dir, 'contour_retardance_out');
 
 % --- Visualization ---
 saveOverlays     = true;    % save boundary overlay images
