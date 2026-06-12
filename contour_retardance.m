@@ -153,6 +153,18 @@ blendCloseRadius_px   = 3;             % SE radius for union_close blend
 % polarRefineIters > 0 (seeded by the polar mask, no drift since
 % iteration count is small).
 useRadialBoundary    = true;      % polar method default; flip false for snake
+% Skeleton-of-the-bright-ring approach (fundamentally different from polar
+% peak picking). When true, replaces the polar method: cortex is found as
+% the largest connected bright ring within a band of BW_thresh, skeletonized
+% to a centerline, then converted to R(theta). External bright objects
+% (debris, polar bodies, separate cells) are disconnected from the cortex
+% ring and get rejected by bwareafilt automatically -- no peak-picking
+% hijack, no global anchor, no parameter tuning per bulge. Set
+% useRadialBoundary = false too if enabling this.
+useSkeletonRing       = false;
+skelPctLevel          = 90;       % cortex threshold = this percentile of Iret(BW_thresh)
+skelBandWidth_um      = 5;        % microns wide band around BW_thresh edge to search
+skelSmoothWindow      = 7;        % circular median smoothing (angular samples); 0 disables
 polarNTheta          = 720;       % angular samples (0.5 deg)
 polarNR              = 400;       % radial samples in the search band
 polarSearchMinFrac   = 0.6;       % inner search bound (fraction of R0)
@@ -874,8 +886,30 @@ for fr = 1:nFrames
         end
     end
 
-    % ---- BOUNDARY REFINEMENT: polar radial peak search OR snake ----
-    if useRadialBoundary
+    % ---- BOUNDARY REFINEMENT: skeleton-ring, polar, or snake ----
+    if useSkeletonRing
+        skelParams = struct(...
+            'nTheta',       polarNTheta, ...
+            'pctLevel',     skelPctLevel, ...
+            'bandWidth_um', skelBandWidth_um, ...
+            'px_per_um',    px_per_um, ...
+            'smoothWindow', skelSmoothWindow);
+        [R_theta, xc_p, yc_p, ~] = skeleton_cortex_ring( ...
+            Iret, BW_thresh, skelParams);
+        if isempty(R_theta) || all(isnan(R_theta))
+            fprintf('  Frame %d: skeleton ring failed, falling back to BW_thresh.\n', fr);
+            BW_new = BW_thresh;
+        else
+            theta_eval = linspace(0, 2*pi, polarNTheta + 1);
+            theta_eval(end) = [];
+            polyXq = xc_p + R_theta .* cos(theta_eval);
+            polyYq = yc_p + R_theta .* sin(theta_eval);
+            BW_new = poly2mask(polyXq, polyYq, H, W);
+            BW_new = BW_new & fovMask;
+            BW_new = bwareaopen(BW_new, minArea);
+        end
+
+    elseif useRadialBoundary
         polarParams = struct(...
             'nTheta',              polarNTheta, ...
             'nR',                  polarNR, ...
@@ -1584,6 +1618,9 @@ results.reseedAreaFrac           = reseedAreaFrac;
 results.blendOp                  = blendOp;
 results.blendCloseRadius_px      = blendCloseRadius_px;
 results.useRadialBoundary        = useRadialBoundary;
+results.useSkeletonRing          = useSkeletonRing;
+results.skelPctLevel             = skelPctLevel;
+results.skelBandWidth_um         = skelBandWidth_um;
 results.polarRTheta              = polarRTheta;
 results.polarNPeaksFound         = polarNPeaksFound;
 results.polarNFallback           = polarNFallback;
