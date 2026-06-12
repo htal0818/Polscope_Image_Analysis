@@ -176,6 +176,14 @@ polarSgolayWindow    = 11;        % sgolay window after NaN fill; 0 disables
 useAngularContinuity     = true;
 polarContinuityMedianWin = 11;     % angular samples for local median (~5.5 deg)
 polarMaxJumpPx           = 20;     % candidates within this many px of R_pred survive
+% Global anchor: catches wide bulges that the local-median continuity
+% can't handle (the bulge spans the median window, so the median itself
+% sits at the bulge radius). For each ray, if the local median has
+% drifted more than globalAnchorMADs * MAD(R_theta) away from the global
+% robust radius, fall back to the global radius as the prediction.
+% Then the bulge candidate is outside maxJumpPx of the global and gets
+% rejected. Set to 0 to disable.
+polarGlobalAnchorMADs    = 3;      % # MADs from global radius = bulge-hijacked
 polarRefineIters         = 0;      % >0 = run this many Chan-Vese iters after polar
 
 % --- Mask sanity checks (catastrophic-failure detection only) ---
@@ -459,6 +467,7 @@ polarNPeaksFound       = zeros(nFrames, 1);
 polarNFallback         = zeros(nFrames, 1);
 polarNMissing          = zeros(nFrames, 1);
 polarNContinuityRevised = zeros(nFrames, 1);
+polarNGlobalAnchorFired = zeros(nFrames, 1);
 polarFailedFrames      = false(nFrames, 1);
 adaptiveScoresByFrame  = nan(nFrames, 1);            % winning sanity score
 
@@ -881,7 +890,8 @@ for fr = 1:nFrames
             'sgolayWindow',         polarSgolayWindow, ...
             'useAngularContinuity', useAngularContinuity, ...
             'continuityMedianWin',  polarContinuityMedianWin, ...
-            'maxJumpPx',            polarMaxJumpPx);
+            'maxJumpPx',            polarMaxJumpPx, ...
+            'globalAnchorMADs',     polarGlobalAnchorMADs);
 
         [R_theta, xc_p, yc_p, info] = polar_cortex_boundary( ...
             Iret, BW_thresh, polarParams);
@@ -900,6 +910,7 @@ for fr = 1:nFrames
             polarNFallback(fr)         = info.nFallback;
             polarNMissing(fr)          = info.nMissing;
             polarNContinuityRevised(fr) = info.nContinuityRevised;
+            polarNGlobalAnchorFired(fr) = info.nGlobalAnchorFired;
 
             theta_eval = linspace(0, 2*pi, polarNTheta + 1);
             theta_eval(end) = [];
@@ -1578,6 +1589,8 @@ results.polarNPeaksFound         = polarNPeaksFound;
 results.polarNFallback           = polarNFallback;
 results.polarNMissing            = polarNMissing;
 results.polarNContinuityRevised  = polarNContinuityRevised;
+results.polarNGlobalAnchorFired  = polarNGlobalAnchorFired;
+results.polarGlobalAnchorMADs    = polarGlobalAnchorMADs;
 results.useAngularContinuity     = useAngularContinuity;
 results.polarMaxJumpPx           = polarMaxJumpPx;
 results.polarContinuityMedianWin = polarContinuityMedianWin;

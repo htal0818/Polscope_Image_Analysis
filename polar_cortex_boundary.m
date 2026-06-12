@@ -36,7 +36,7 @@ function [R_theta, xc, yc, info] = polar_cortex_boundary(Iret, BW_thresh, params
 %   info    - struct with diagnostic fields (nPeaksFound, nFallback, etc.)
 
 info = struct('nPeaksFound', 0, 'nFallback', 0, 'nMissing', 0, ...
-              'nContinuityRevised', 0, ...
+              'nContinuityRevised', 0, 'nGlobalAnchorFired', 0, ...
               'R0_px', NaN, 'Rmin_px', NaN, 'Rmax_px', NaN);
 
 R_theta = [];
@@ -140,12 +140,27 @@ end
 % ray is assigned the radius of an actual candidate peak that exists
 % in its own profile and is consistent with its neighborhood.
 info.nContinuityRevised = 0;
+info.nGlobalAnchorFired = 0;
 if isfield(params, 'useAngularContinuity') && params.useAngularContinuity
     R_pad = [R_theta R_theta R_theta];
     R_med = smoothdata(R_pad, 'movmedian', params.continuityMedianWin, ...
                        'includenan');
     R_med = R_med(nT + 1 : 2*nT);
-    R_med_global = median(R_theta(~isnan(R_theta)), 'omitnan');
+
+    % Global robust radius + MAD across the whole contour. Used as a
+    % sanity anchor when the local median has been hijacked by a wide
+    % bulge (debris, polar body, image-edge artifact). If the local
+    % median sits more than hijackThresh away from the global, the
+    % bulge has captured the local prediction -- fall back to the
+    % global radius so the bulge candidate gets rejected by the
+    % maxJumpPx test that follows.
+    R_global = median(R_theta(~isnan(R_theta)), 'omitnan');
+    R_mad    = median(abs(R_theta(~isnan(R_theta)) - R_global), 'omitnan');
+    if isfield(params, 'globalAnchorMADs') && params.globalAnchorMADs > 0
+        hijackThresh = max(params.maxJumpPx, params.globalAnchorMADs * R_mad);
+    else
+        hijackThresh = Inf;   % disabled
+    end
 
     for j = 1:nT
         cV = candVals{j};
@@ -153,8 +168,16 @@ if isfield(params, 'useAngularContinuity') && params.useAngularContinuity
         if isempty(cR); continue; end
 
         R_pred = R_med(j);
-        if isnan(R_pred); R_pred = R_med_global; end
+        if isnan(R_pred); R_pred = R_global; end
         if isnan(R_pred); continue; end
+
+        % Global anchor: if the local median was hijacked by a wide bulge,
+        % fall back to the global robust radius so the bulge candidate
+        % falls outside the maxJumpPx band.
+        if ~isnan(R_global) && abs(R_pred - R_global) > hijackThresh
+            R_pred = R_global;
+            info.nGlobalAnchorFired = info.nGlobalAnchorFired + 1;
+        end
 
         within = abs(cR - R_pred) <= params.maxJumpPx;
         if ~any(within); continue; end   % keep pass-2 pick
