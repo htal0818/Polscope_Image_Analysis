@@ -186,12 +186,14 @@ def find_boundary_and_center(BW):
 def nematic_order_map(phi_rad, weight, mask, sigma_px=31):
     """Local 2D nematic order parameter via Q-tensor averaging.
 
-    Following Mirza et al. (eLife 2024, arXiv:2306.15352), the 2D nematic
-    Q tensor is Q_ij = S (n_i n_j - delta_ij / 2) with independent components:
-        q1 = Q_11 = -Q_22 = <cos(2 phi)>_w / 2
-        q2 = Q_12 =  Q_21 = <sin(2 phi)>_w / 2
-    where <>_w denotes retardance-weighted Gaussian spatial averaging.
-
+    Following Mirza et al. (eLife 2024, arXiv:2306.15352), the per-pixel
+    nematic Q tensor is Q_ij = S_pixel (n_i n_j - delta_ij / 2), where
+    S_pixel is the retardance at each pixel.  The independent components are:
+        q1_pixel = retardance * cos(2 phi) / 2
+        q2_pixel = retardance * sin(2 phi) / 2
+    The local (Gaussian-averaged) Q-tensor components are area-normalized:
+        q1 = <q1_pixel>_G / <mask>_G
+        q2 = <q2_pixel>_G / <mask>_G
     The scalar order parameter is:
         S = sqrt(2 Q_ij Q_ij) = 2 sqrt(q1^2 + q2^2)
     and the mean director angle is:
@@ -200,31 +202,30 @@ def nematic_order_map(phi_rad, weight, mask, sigma_px=31):
     Parameters
     ----------
     phi_rad : 2D array, orientation in radians [0, pi)
-    weight  : 2D array, per-pixel weight (retardance, or ones)
+    weight  : 2D array, per-pixel retardance (provides per-pixel S)
     mask    : 2D bool, region of interest
     sigma_px : float, Gaussian kernel sigma in pixels
 
     Returns
     -------
-    S   : 2D array, scalar order parameter [0, 1], NaN outside mask
+    S   : 2D array, scalar order parameter, NaN outside mask
     psi : 2D array, local mean director angle (rad), NaN outside mask
     q1  : 2D array, Q-tensor component Q_11, NaN outside mask
     q2  : 2D array, Q-tensor component Q_12, NaN outside mask
     """
     C = np.cos(2 * phi_rad)
     Sm = np.sin(2 * phi_rad)
-    w = weight.copy()
-    w[~mask] = 0
 
-    num_C = gaussian_filter(w * C, sigma_px)
-    num_S = gaussian_filter(w * Sm, sigma_px)
-    den_W = gaussian_filter(w, sigma_px)
+    q1_pixel = weight * C / 2.0
+    q2_pixel = weight * Sm / 2.0
+    q1_pixel[~mask] = 0.0
+    q2_pixel[~mask] = 0.0
 
-    avg_cos2phi = num_C / np.maximum(den_W, 1e-10)
-    avg_sin2phi = num_S / np.maximum(den_W, 1e-10)
+    mask_float = mask.astype(float)
+    mask_avg = gaussian_filter(mask_float, sigma_px)
 
-    q1 = avg_cos2phi / 2.0
-    q2 = avg_sin2phi / 2.0
+    q1 = gaussian_filter(q1_pixel, sigma_px) / np.maximum(mask_avg, 1e-10)
+    q2 = gaussian_filter(q2_pixel, sigma_px) / np.maximum(mask_avg, 1e-10)
 
     S = 2.0 * np.sqrt(q1**2 + q2**2)
     psi = 0.5 * np.arctan2(q2, q1)
@@ -239,24 +240,24 @@ def nematic_order_map(phi_rad, weight, mask, sigma_px=31):
 def nematic_order_global(phi_rad, weight, mask):
     """Whole-mask scalar order parameter via Q-tensor averaging.
 
-    Computes the retardance-weighted average of the nematic Q tensor
-    over the entire mask following Mirza et al. (eLife 2024):
-        q1 = <cos(2 phi)>_w / 2,  q2 = <sin(2 phi)>_w / 2
+    Computes the area-averaged nematic Q tensor over the entire mask
+    following Mirza et al. (eLife 2024).  Retardance provides the
+    per-pixel S so the Q tensor is q_ij = ret * (n_i n_j - delta_ij/2):
+        q1 = mean(ret * cos(2 phi)) / 2
+        q2 = mean(ret * sin(2 phi)) / 2
         S = 2 sqrt(q1^2 + q2^2),  psi = (1/2) arctan2(q2, q1)
 
     Returns (S, psi, q1, q2).
     """
+    N = mask.sum()
+    if N <= 0:
+        return np.nan, np.nan, np.nan, np.nan
     w = weight[mask]
     C = np.cos(2 * phi_rad[mask])
     Sm = np.sin(2 * phi_rad[mask])
-    W_tot = np.sum(w)
-    if W_tot <= 0:
-        return np.nan, np.nan, np.nan, np.nan
-    avg_cos2phi = np.sum(w * C) / W_tot
-    avg_sin2phi = np.sum(w * Sm) / W_tot
 
-    q1 = avg_cos2phi / 2.0
-    q2 = avg_sin2phi / 2.0
+    q1 = np.mean(w * C) / 2.0
+    q2 = np.mean(w * Sm) / 2.0
 
     S = 2.0 * np.hypot(q1, q2)
     psi = 0.5 * np.arctan2(q2, q1)
@@ -374,16 +375,11 @@ def cortex_nematic_profile(phi_rad, weight, xb, yb, xc, yc,
 
     for b in range(n_theta_bins):
         m = bins == b
-        if not np.any(m):
+        n_pts = np.sum(m)
+        if n_pts == 0:
             continue
-        w_sum = np.sum(wvals[m])
-        if w_sum <= 0:
-            continue
-        avg_cos2phi = np.sum(wvals[m] * cvals[m]) / w_sum
-        avg_sin2phi = np.sum(wvals[m] * svals[m]) / w_sum
-
-        q1_theta[b] = avg_cos2phi / 2.0
-        q2_theta[b] = avg_sin2phi / 2.0
+        q1_theta[b] = np.mean(wvals[m] * cvals[m]) / 2.0
+        q2_theta[b] = np.mean(wvals[m] * svals[m]) / 2.0
         S_theta[b] = 2.0 * np.hypot(q1_theta[b], q2_theta[b])
         psi_theta[b] = 0.5 * np.arctan2(q2_theta[b], q1_theta[b])
 
@@ -934,6 +930,8 @@ def main():
                 retardance = resize(retardance, (H, W), preserve_range=True)
             weight = retardance.copy()
         else:
+            print('  WARNING: No retardance image found — Q-tensor requires '
+                  'retardance for per-pixel S. Falling back to uniform weights.')
             weight = np.ones((H, W), dtype=float)
 
         # --- Segmentation (reuse mask if stable) ---
