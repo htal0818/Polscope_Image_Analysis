@@ -61,7 +61,12 @@ function result = measure_contour_retardance(Iraw, opts)
 %               Iret           — retardance image in nm
 %               success        — logical, true if boundary was found
 %
-%   Requires: circfit.m (in this repository), Image Processing Toolbox
+%   Requires: segment_oocyte.m + circfit.m (in this repo), Image Processing Toolbox
+%
+%   NOTE: segmentation is delegated to segment_oocyte.m (one shared pipeline).
+%   The gradient/edge/boundary-support options listed below are DEPRECATED and
+%   ignored; the mask now comes from segment_oocyte with automatic egg polarity,
+%   and the cortical inset follows the true inward normal (no circular assumption).
 
     %% Defaults
     if nargin < 2; opts = struct(); end
@@ -108,139 +113,108 @@ function result = measure_contour_retardance(Iraw, opts)
     Iret = (Iraw / maxPixVal) * opts.retardance_ceiling_nm;
     [H, W] = size(Iraw);
 
-    %% Boundary detection
-    % Use separate segmentation image if provided (e.g. sum of State1-4),
-    % otherwise fall back to Iraw.
+    %% Boundary detection — delegated to the shared segment_oocyte pipeline
+    % Segment on a separate image if provided (e.g. the State1..4 sum, which has
+    % far better egg/background contrast than the retardance image), then copy
+    % that mask onto the retardance image for measurement. If no Iseg is given,
+    % segment the retardance image itself. All segmentation lives in ONE place
+    % (segment_oocyte.m), shared with the flow scripts.
     if ~isempty(opts.Iseg)
         Iseg = opts.Iseg;
     else
         Iseg = Iraw;
     end
 
-    I_blur = imgaussfilt(Iseg, opts.sigmaBlur);
-    I_norm = normalize01(I_blur);
-    I_edge = imgaussfilt(normalize01(Iseg), opts.gradSigma);
+    segParams = struct( ...
+        'sigmaBlur',               opts.sigmaBlur, ...
+        'closeRadius',             opts.closeRadius, ...
+        'minArea',                 opts.minArea, ...
+        'thresholdMode',           opts.thresholdMode, ...
+        'fixedThreshold',          opts.fixedThreshold, ...
+        'percentileThreshold',     opts.percentileThreshold, ...
+        'adaptSensitivity',        opts.adaptiveSensitivity, ...
+        'useActiveContour',        opts.useActiveContour, ...
+        'activeContourIterations', opts.activeContourIterations, ...
+        'activeContourMethod',     opts.activeContourMethod, ...
+        'useCaching',              false, ...
+        'smoothMask',              false, ...
+        'smoothBoundary',          false);
 
-    switch opts.thresholdMode
-        case 'otsu'
-            BW = I_norm > graythresh(I_norm);
-        case 'fixed'
-            BW = I_blur > opts.fixedThreshold;
-        case 'percentile'
-            pVal = prctile(I_blur(:), opts.percentileThreshold);
-            BW = I_blur > pVal;
-        case 'adaptive'
-            T = adaptthresh(I_norm, opts.adaptiveSensitivity);
-            BW = imbinarize(I_norm, T);
-        otherwise
-            error('Unknown thresholdMode: %s', opts.thresholdMode);
+    % Egg polarity:
+    %   - four-state solid disc (Iseg given): leave segFromMask UNSET so
+    %     segment_oocyte auto-detects whether the egg is darker or brighter.
+    %   - retardance image (no Iseg): the egg is defined by its bright cortical
+    %     rim, so force the bright class (segFromMask = false); segment_oocyte
+    %     then fills the disc enclosed by the rim.
+    %   - a caller may override either by setting opts.segFromMask explicitly.
+    if isfield(opts, 'segFromMask') && ~isempty(opts.segFromMask)
+        segParams.segFromMask = opts.segFromMask;
+    elseif isempty(opts.Iseg)
+        segParams.segFromMask = false;
     end
 
-    gradMask = false(size(BW));
-    edgeMask = false(size(BW));
-    boundarySupport = false(size(BW));
+    [BW, xc, yc, R_fit, polyXY] = segment_oocyte(Iseg, segParams, []);
 
-    if opts.useGradientThreshold || opts.useEdgeThreshold
-        if opts.useGradientThreshold
-            [Gmag, ~] = imgradient(I_edge);
-            Gmag = normalize01(Gmag);
-            gradThresh = prctile(Gmag(:), opts.gradPercentile);
-            gradMask = Gmag > gradThresh;
-            gradMask = bwareaopen(gradMask, 10);
-            boundarySupport = boundarySupport | gradMask;
-        end
+    % Legacy support masks: no longer used for detection, kept (empty) so the
+    % result struct and the overlay saver stay backward-compatible.
+    gradMask = false(H, W);
+    edgeMask = false(H, W);
+    boundarySupport = false(H, W);
 
-        if opts.useEdgeThreshold
-            edgeMask = edge(I_edge, 'Canny', opts.cannyThresholds);
-            edgeMask = bwareaopen(edgeMask, 10);
-            boundarySupport = boundarySupport | edgeMask;
-        end
-
-        if opts.useBoundarySupportMask
-            BW_boundary = make_boundary_support_mask(boundarySupport, opts);
-            if any(BW_boundary(:))
-                BW = BW_boundary;
-            end
-        else
-            if opts.edgeDilateRadius > 0
-                boundarySupport = imdilate(boundarySupport, strel('disk', opts.edgeDilateRadius));
-            end
-
-            BW_edge = imclose(boundarySupport, strel('disk', opts.closeRadius));
-            BW_edge = imfill(BW_edge, 'holes');
-            BW_edge = bwareaopen(BW_edge, opts.minArea);
-
-            if any(BW_edge(:))
-                BW = BW | BW_edge;
-            end
-        end
-    end
-
-    % Morphological cleanup
-    se = strel('disk', opts.closeRadius);
-    BW = imclose(BW, se);
-    BW = imfill(BW, 'holes');
-    BW = bwareaopen(BW, opts.minArea);
-
-    % Fallback: gradient-based
-    if ~any(BW(:))
-        [Gmag, ~] = imgradient(I_blur);
-        thrG = max(2*mean(Gmag(:)), prctile(Gmag(:), 80));
-        BW = Gmag >= thrG;
-        BW = imclose(BW, se);
-        BW = imfill(BW, 'holes');
-        BW = bwareaopen(BW, opts.minArea);
-    end
-
-    % Keep largest connected component
-    L = bwlabel(BW, 8);
-    if max(L(:)) >= 1
-        BW = keep_largest_component(BW);
-    elseif ~isempty(opts.prevBW)
+    if isempty(polyXY) && ~isempty(opts.prevBW)
         BW = opts.prevBW;
-    else
-        % Failed — return empty result
+    end
+    if ~any(BW(:))
         result = make_empty_result(Iret, BW, gradMask, edgeMask, boundarySupport);
         return;
     end
-
     BW_initial = BW;
 
-    if opts.useActiveContour
-        BW_active = activecontour(I_edge, BW_initial, opts.activeContourIterations, ...
-            opts.activeContourMethod, ...
-            'SmoothFactor', opts.activeSmoothFactor, ...
-            'ContractionBias', opts.activeContractionBias);
-        BW_active = imfill(BW_active, 'holes');
-        BW_active = bwareaopen(BW_active, opts.minArea);
-
-        if any(BW_active(:))
-            BW = keep_largest_component(BW_active);
+    %% Boundary contour (the TRUE outline from the mask — NOT assumed circular)
+    if ~isempty(polyXY)
+        xb = polyXY(:,1);
+        yb = polyXY(:,2);
+    else
+        B = bwboundaries(BW);
+        if isempty(B)
+            result = make_empty_result(Iret, BW, gradMask, edgeMask, boundarySupport);
+            return;
         end
+        [~, iLongest] = max(cellfun(@(p) size(p,1), B));
+        bnd = B{iLongest};
+        yb = bnd(:,1);
+        xb = bnd(:,2);
     end
 
-    %% Extract boundary contour
-    B = bwboundaries(BW);
-    if isempty(B)
-        result = make_empty_result(Iret, BW, gradMask, edgeMask, boundarySupport);
-        return;
+    %% Inset the boundary inward along the TRUE inward normal (shape-agnostic)
+    % Peel each boundary point in by boundaryInset_px along the local inward
+    % normal, taken from the gradient of the in-mask distance transform. This
+    % follows dents and elongation of a non-circular egg, unlike the old method
+    % that shrank every point radially toward a single circle-fit centre.
+    Din = bwdist(~BW);                       % depth inside the egg (px), 0 at edge
+    [Gx, Gy] = imgradientxy(Din, 'central'); % Gx = x/column gradient, Gy = y/row
+    F_Gx = griddedInterpolant({1:H, 1:W}, Gx, 'linear', 'nearest');
+    F_Gy = griddedInterpolant({1:H, 1:W}, Gy, 'linear', 'nearest');
+    nx = F_Gx(yb, xb);                       % x-component of inward normal
+    ny = F_Gy(yb, xb);                       % y-component of inward normal
+    nmag = hypot(nx, ny) + eps;
+    nx = nx ./ nmag;                         % inward = +gradient of interior depth
+    ny = ny ./ nmag;
+
+    % Guarantee the normal points into the egg (toward the centroid), even where
+    % the distance-transform gradient is degenerate.
+    S = regionprops(BW, 'Centroid');
+    if ~isempty(S)
+        cen = S(1).Centroid;
+        flip = ((cen(1) - xb) .* nx + (cen(2) - yb) .* ny) < 0;
+        nx(flip) = -nx(flip);
+        ny(flip) = -ny(flip);
     end
-    [~, iLongest] = max(cellfun(@(p) size(p,1), B));
-    bnd = B{iLongest};
-    yb = bnd(:,1);
-    xb = bnd(:,2);
 
-    %% Circle fit for center & radius
-    [R_fit, xc, yc] = circfit(xb, yb);
+    xb = xb + opts.boundaryInset_px * nx;
+    yb = yb + opts.boundaryInset_px * ny;
 
-    % Shrink boundary inward onto cortical ring center
-    dx = xb - xc;  dy = yb - yc;
-    dist = sqrt(dx.^2 + dy.^2);
-    shrink = max(dist - opts.boundaryInset_px, 1) ./ dist;
-    xb = xc + dx .* shrink;
-    yb = yc + dy .* shrink;
-
-    %% Interpolate retardance (nm) at boundary pixel locations
+    %% Interpolate retardance (nm) at the inset boundary locations
     F = griddedInterpolant({1:H, 1:W}, Iret, 'linear', 'nearest');
     ib = F(yb, xb);
 

@@ -52,29 +52,29 @@ state_patterns = {'*State1*', '*State2*', '*State3*', '*State4*'};
 opts = struct();
 opts.retardance_ceiling_nm = 50;    % Polscope retardance ceiling (nm)
 opts.bit_depth             = 16;    % image bit depth (16-bit = 0..65535)
-opts.sigmaBlur             = 1;    % Gaussian blur sigma (px) for segmentation
-opts.closeRadius           = 25;    % morphological close disk radius (px)
+opts.sigmaBlur             = 2;    % Gaussian blur sigma (px) for segmentation
+opts.closeRadius           = 25;    % morphological close disk radius (px); bridges the cortical rim
 opts.minArea               = 5000;  % minimum object area (px^2) to reject debris
-opts.thresholdMode         = 'adaptive';
+opts.thresholdMode         = 'otsu';  % 'otsu' is most robust on the state-sum; also 'adaptive'/'fixed'/'percentile'
 opts.fixedThreshold        = 500;
 opts.percentileThreshold   = 30;
 opts.adaptiveSensitivity   = 0.35; % for 'adaptive' mode (0-1, higher = more foreground)
 
-% --- Optional gradient/edge support and active-contour refinement ---
-% These operate on the segmentation image only; retardance measurements still
-% use Iraw converted to nm inside measure_contour_retardance().
-opts.useGradientThreshold     = true;
-opts.gradSigma                = 1;
-opts.gradPercentile           = 90;
-opts.useEdgeThreshold         = true;
-opts.cannyThresholds          = [0.25 0.4];
-opts.edgeDilateRadius         = 1;
-opts.useBoundarySupportMask   = true;
-opts.boundaryCloseRadius      = 20;
-opts.boundaryDilateRadius     = 1;
-opts.useActiveContour         = true;
+% --- Segmentation refinement ---
+% NOTE: the gradient/edge/boundary-support masks below are DEPRECATED. The
+% segmentation now thresholds the state-sum with automatic polarity, fills it
+% into one solid egg disc, and copies that mask to the retardance image (see
+% measure_contour_retardance.m). These flags are ignored and kept only so old
+% saved configs still load.
+opts.useGradientThreshold     = false;
+opts.useEdgeThreshold         = false;
+opts.useBoundarySupportMask   = false;
+
+% Active contour is OFF by default: Chan-Vese/edge contours drift on these
+% low-contrast, textured eggs. Turn on only if you verify it helps on your data.
+opts.useActiveContour         = false;
 opts.activeContourIterations  = 150;
-opts.activeContourMethod      = 'edge';
+opts.activeContourMethod      = 'Chan-Vese';
 opts.activeSmoothFactor       = 1.0;
 opts.activeContractionBias    = 0.0;
 
@@ -204,7 +204,7 @@ for si = 1:numel(smDirs)
                   + double(imread(stateFiles{3})) ...
                   + double(imread(stateFiles{4}))) / 4;
             opts.Iseg = Isum;
-            opts.thresholdMode = 'adaptive';
+            opts.thresholdMode = 'otsu';
 
             % Also load the retardance image for measurement
             d = dir(fullfile(pos0Dir, retardance_pattern));
