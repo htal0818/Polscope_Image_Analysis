@@ -55,7 +55,22 @@ opts.bit_depth             = 16;    % image bit depth (16-bit = 0..65535)
 opts.sigmaBlur             = 2;    % Gaussian blur sigma (px) for segmentation
 opts.closeRadius           = 25;    % morphological close disk radius (px); bridges the cortical rim
 opts.minArea               = 5000;  % minimum object area (px^2) to reject debris
-opts.thresholdMode         = 'otsu';  % 'otsu' is most robust on the state-sum; also 'adaptive'/'fixed'/'percentile'
+% Segmentation method used by segment_oocyte on the state-sum:
+%   'otsu'       intensity threshold (default; most robust on a solid disc)
+%   'adaptive'   locally-adaptive intensity threshold
+%   'fixed'      raw-intensity cutoff (opts.fixedThreshold)
+%   'percentile' intensity percentile cutoff (opts.percentileThreshold)
+%   'edge'       Canny edge of the egg rim, dilated + filled into a disc
+%   'gradient'   high-gradient-magnitude rim, dilated + filled into a disc
+% Egg polarity is auto-detected; all modes then keep the largest filled object.
+% NOTE: 'edge'/'gradient' key on the rim, so they can leak if the rim has a gap
+% or the frame has strong edges. Prefer 'otsu' unless it under-segments an egg.
+opts.thresholdMode         = 'otsu';
+
+% Knobs for 'edge' / 'gradient' modes:
+opts.edgeMethod            = 'Canny'; % edge() method for 'edge' mode
+opts.edgeDilateRadius      = 2;       % dilate detected edges (px) to close gaps before filling
+opts.gradientPercentile    = 70;      % keep gradient magnitudes above this percentile ('gradient' mode)
 opts.fixedThreshold        = 500;
 opts.percentileThreshold   = 30;
 opts.adaptiveSensitivity   = 0.35; % for 'adaptive' mode (0-1, higher = more foreground)
@@ -204,7 +219,8 @@ for si = 1:numel(smDirs)
                   + double(imread(stateFiles{3})) ...
                   + double(imread(stateFiles{4}))) / 4;
             opts.Iseg = Isum;
-            opts.thresholdMode = 'otsu';
+            % thresholdMode is taken from the USER INPUTS block above (otsu by
+            % default; set it to 'edge'/'gradient'/'adaptive' there to switch).
 
             % Also load the retardance image for measurement
             d = dir(fullfile(pos0Dir, retardance_pattern));
