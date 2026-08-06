@@ -443,9 +443,14 @@ fprintf('========================================================\n');
 fprintf('\nOutputs saved to: %s\n', outDir);
 
 function save_contour_overlay(Ioverlay, res, overlayDir, smName, imgPath)
+    if ~exist(overlayDir, 'dir'); mkdir(overlayDir); end
     [~, baseName, ~] = fileparts(imgPath);
-    safeSmName = regexprep(smName, '[^\w-]', '_');
-    outBase = sprintf('%s_%s', safeSmName, baseName);
+    % Sanitize BOTH the folder name and the image basename: PolScope retardance
+    % filenames contain spaces and " - " (e.g. "...Retardance - Computed Image"),
+    % which imwrite rejects in the output path. Replace any non-word char with _.
+    safeSmName   = regexprep(smName,   '[^\w-]', '_');
+    safeBaseName = regexprep(baseName, '[^\w-]', '_');
+    outBase = sprintf('%s_%s', safeSmName, safeBaseName);
 
     rgbBase = repmat(mat2gray(Ioverlay), 1, 1, 3);
 
