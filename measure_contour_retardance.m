@@ -117,105 +117,94 @@ function result = measure_contour_retardance(Iraw, opts)
         Iseg = Iraw;
     end
 
-    I_blur = imgaussfilt(Iseg, opts.sigmaBlur);
+    I_blur = imgaussfilt(double(Iseg), opts.sigmaBlur);
     I_norm = normalize01(I_blur);
-    I_edge = imgaussfilt(normalize01(Iseg), opts.gradSigma);
 
+    % --- Threshold the segmentation image into two classes (bright / dark) ---
     switch opts.thresholdMode
         case 'otsu'
-            BW = I_norm > graythresh(I_norm);
+            bright = I_norm > graythresh(I_norm);
         case 'fixed'
-            BW = I_blur > opts.fixedThreshold;
+            bright = I_blur > opts.fixedThreshold;
         case 'percentile'
-            pVal = prctile(I_blur(:), opts.percentileThreshold);
-            BW = I_blur > pVal;
+            bright = I_blur > prctile(I_blur(:), opts.percentileThreshold);
         case 'adaptive'
             T = adaptthresh(I_norm, opts.adaptiveSensitivity);
-            BW = imbinarize(I_norm, T);
+            bright = imbinarize(I_norm, T);
         otherwise
             error('Unknown thresholdMode: %s', opts.thresholdMode);
     end
 
-    gradMask = false(size(BW));
-    edgeMask = false(size(BW));
-    boundarySupport = false(size(BW));
-
-    if opts.useGradientThreshold || opts.useEdgeThreshold
-        if opts.useGradientThreshold
-            [Gmag, ~] = imgradient(I_edge);
-            Gmag = normalize01(Gmag);
-            gradThresh = prctile(Gmag(:), opts.gradPercentile);
-            gradMask = Gmag > gradThresh;
-            gradMask = bwareaopen(gradMask, 10);
-            boundarySupport = boundarySupport | gradMask;
-        end
-
-        if opts.useEdgeThreshold
-            edgeMask = edge(I_edge, 'Canny', opts.cannyThresholds);
-            edgeMask = bwareaopen(edgeMask, 10);
-            boundarySupport = boundarySupport | edgeMask;
-        end
-
-        if opts.useBoundarySupportMask
-            BW_boundary = make_boundary_support_mask(boundarySupport, opts);
-            if any(BW_boundary(:))
-                BW = BW_boundary;
-            end
+    % --- Build the egg mask (strategy depends on the segmentation image) ---
+    if ~isempty(opts.Iseg)
+        % SOLID-DISC segmentation (e.g. the State1..4 sum): the egg is a filled
+        % intensity region. Pick the egg class by AUTO-POLARITY — the class that
+        % dominates the frame CENTRE is the egg, the class filling the BORDER is
+        % background — so it works whether the egg is darker or brighter than the
+        % field. (The old code always kept the *bright* class, so a dark egg on a
+        % bright field selected the background and the mask leaked to the frame.)
+        cReg = false(H, W);
+        cReg(round(H*0.35):round(H*0.65), round(W*0.35):round(W*0.65)) = true;
+        if mean(bright(cReg)) >= 0.5
+            obj = bright;      % egg is the bright class
         else
-            if opts.edgeDilateRadius > 0
-                boundarySupport = imdilate(boundarySupport, strel('disk', opts.edgeDilateRadius));
-            end
-
-            BW_edge = imclose(boundarySupport, strel('disk', opts.closeRadius));
-            BW_edge = imfill(BW_edge, 'holes');
-            BW_edge = bwareaopen(BW_edge, opts.minArea);
-
-            if any(BW_edge(:))
-                BW = BW | BW_edge;
-            end
+            obj = ~bright;     % egg is the dark class
         end
-    end
-
-    % Morphological cleanup
-    se = strel('disk', opts.closeRadius);
-    BW = imclose(BW, se);
-    BW = imfill(BW, 'holes');
-    BW = bwareaopen(BW, opts.minArea);
-
-    % Fallback: gradient-based
-    if ~any(BW(:))
-        [Gmag, ~] = imgradient(I_blur);
-        thrG = max(2*mean(Gmag(:)), prctile(Gmag(:), 80));
-        BW = Gmag >= thrG;
-        BW = imclose(BW, se);
+        obj = imclose(obj, strel('disk', opts.closeRadius));  % bridge rim/texture gaps
+        obj = imfill(obj, 'holes');
+        obj = bwareaopen(obj, opts.minArea);
+        BW  = keep_largest_component(obj);
+    else
+        % RIM segmentation (retardance image, no separate seg image): the egg
+        % interior is nearly as dark as the background, so the egg is defined
+        % only by its bright cortical RIM. Take the bright class and fill the
+        % disc enclosed by that rim.
+        BW = imfill(bright, 'holes');
+        BW = imclose(BW, strel('disk', opts.closeRadius));
         BW = imfill(BW, 'holes');
         BW = bwareaopen(BW, opts.minArea);
+        BW = keep_largest_component(BW);
     end
 
-    % Keep largest connected component
-    L = bwlabel(BW, 8);
-    if max(L(:)) >= 1
+    % Legacy support masks are no longer used for detection but are kept (empty)
+    % so the result struct and the overlay saver stay backward-compatible.
+    gradMask = false(H, W);
+    edgeMask = false(H, W);
+    boundarySupport = false(H, W);
+
+    % Fallback: gradient-based, if the threshold collapsed to nothing.
+    if ~any(BW(:))
+        [Gmag, ~] = imgradient(I_blur);
+        thrG = max(2*mean(Gmag(:)), prctile(Gmag(:), 90));
+        BW = imfill(Gmag >= thrG, 'holes');
+        BW = bwareaopen(BW, opts.minArea);
         BW = keep_largest_component(BW);
-    elseif ~isempty(opts.prevBW)
-        BW = opts.prevBW;
-    else
-        % Failed — return empty result
-        result = make_empty_result(Iret, BW, gradMask, edgeMask, boundarySupport);
-        return;
+    end
+    if ~any(BW(:))
+        if ~isempty(opts.prevBW)
+            BW = opts.prevBW;
+        else
+            result = make_empty_result(Iret, BW, gradMask, edgeMask, boundarySupport);
+            return;
+        end
     end
 
     BW_initial = BW;
 
+    % --- Optional active-contour refinement (OFF by default) ---
+    % Chan-Vese / edge active contours drift on these low-contrast, textured
+    % eggs (the dark interior groups with the dark background), so leave
+    % useActiveContour = false unless you have verified it helps on your data.
     if opts.useActiveContour
-        BW_active = activecontour(I_edge, BW_initial, opts.activeContourIterations, ...
+        BW_active = activecontour(I_norm, BW_initial, opts.activeContourIterations, ...
             opts.activeContourMethod, ...
             'SmoothFactor', opts.activeSmoothFactor, ...
             'ContractionBias', opts.activeContractionBias);
         BW_active = imfill(BW_active, 'holes');
         BW_active = bwareaopen(BW_active, opts.minArea);
-
+        BW_active = keep_largest_component(BW_active);
         if any(BW_active(:))
-            BW = keep_largest_component(BW_active);
+            BW = BW_active;
         end
     end
 
