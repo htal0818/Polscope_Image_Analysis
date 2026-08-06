@@ -52,7 +52,14 @@ sigmaBlur            = getfield_default(params, 'sigmaBlur', 10);
 closeRadius          = getfield_default(params, 'closeRadius', 25);
 minArea              = getfield_default(params, 'minArea', 5000);
 thresholdMode        = getfield_default(params, 'thresholdMode', 'otsu');
-segFromMask          = getfield_default(params, 'segFromMask', true);
+% segFromMask is the egg-polarity flag: true = egg is DARKER than the field,
+% false = egg is BRIGHTER. Leave it UNSET ([]) to auto-detect polarity per image
+% (see below). Callers that set it explicitly (e.g. the flow scripts) keep their
+% exact behavior.
+segFromMask          = getfield_default(params, 'segFromMask', []);
+autoPolarity         = isempty(segFromMask);
+fixedThreshold       = getfield_default(params, 'fixedThreshold', 500);
+percentileThreshold  = getfield_default(params, 'percentileThreshold', 30);
 adaptSensitivity     = getfield_default(params, 'adaptSensitivity', 0.7);
 adaptNeighborhood    = getfield_default(params, 'adaptNeighborhood', 201);
 edgeMethod           = getfield_default(params, 'edgeMethod', 'Canny');
@@ -111,6 +118,21 @@ if needsRecalc || ~useCaching
     I_blur = imgaussfilt(Iseg, sigmaBlur);
     I_norm = I_blur / max(I_blur(:));
 
+    % Auto-detect egg polarity when segFromMask was left unset. The oocyte fills
+    % the frame CENTRE and the mounting medium fills the BORDER, so if the centre
+    % is darker than the border the egg is the dark class (segFromMask = true),
+    % otherwise it is the bright class. This avoids the old failure where a dark
+    % egg on a bright field was mis-segmented as background (mask leaked to frame).
+    if autoPolarity
+        [Hn, Wn] = size(I_norm);
+        cReg = false(Hn, Wn);
+        cReg(round(Hn*0.35):round(Hn*0.65), round(Wn*0.35):round(Wn*0.65)) = true;
+        bw = max(1, round(0.06 * min(Hn, Wn)));
+        bReg = true(Hn, Wn);
+        bReg(bw+1:Hn-bw, bw+1:Wn-bw) = false;
+        segFromMask = mean(I_norm(cReg), 'omitnan') < mean(I_norm(bReg), 'omitnan');
+    end
+
     switch thresholdMode
         case 'adaptive'
             T = adaptthresh(Iseg);
@@ -138,6 +160,21 @@ if needsRecalc || ~useCaching
                 BW = I_norm < Totsu;
             else
                 BW = I_norm > Totsu;
+            end
+
+        case 'fixed'
+            if segFromMask
+                BW = I_blur < fixedThreshold;
+            else
+                BW = I_blur > fixedThreshold;
+            end
+
+        case 'percentile'
+            pVal = prctile(I_blur(:), percentileThreshold);
+            if segFromMask
+                BW = I_blur < pVal;
+            else
+                BW = I_blur > pVal;
             end
 
         case 'gradient'
