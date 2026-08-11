@@ -380,7 +380,15 @@ if ~isempty(o.ScwWindow) && isfinite(C.retardance.strengthNm2)
 end
 
 if ~isempty(o.OutDir), exportCsv(C, R, o); end
-if o.Plot, plotCurvature(C, R, o); end
+% plotting must never cost the caller the computed result
+if o.Plot
+    try
+        plotCurvature(C, R, o);
+    catch pe
+        warning('scw:plot', ...
+            'Summary figure failed (%s). Results in C are unaffected.', pe.message);
+    end
+end
 end
 
 

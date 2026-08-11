@@ -235,7 +235,15 @@ if o.Timing
     for q = 1:3, fprintf('  %-13s %6.1f s  (%.3f s/frame)\n', ...
             L{q}, tStage(q), tStage(q)/nF); end
 end
-if o.Plot, plotSummary(R, S, frames, bits, o); end
+% plotting must never cost the caller the computed result
+if o.Plot
+    try
+        plotSummary(R, S, frames, bits, o);
+    catch pe
+        warning('scw:plot', ...
+            'Summary figure failed (%s). Results in R are unaffected.', pe.message);
+    end
+end
 end
 
 
