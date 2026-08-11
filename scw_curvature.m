@@ -21,9 +21,8 @@ function C = scw_curvature(R, varargin)
 %                    kappa = (r^2 + 2 r'^2 - r r'') / (r^2 + r'^2)^(3/2)
 %                 kappa = 1/r for a circle; negative in concave dents.
 %     3. RELATIVE To remove uneven starting shapes, relative curvature is
-%                 kappa minus the curvature of the reference frame
-%                 ('RefFrames', default the first QC-ok frame), segment by
-%                 segment.
+%                 kappa minus the mean curvature of the metaphase reference
+%                 frames ('RefFrames', see Options), segment by segment.
 %     4. STRENGTH SCW strength = variance of the radii of curvature during
 %                 'ScwWindow' minus the variance during 'BgWindow', an
 %                 equal time window in metaphase. Radii are capped at
@@ -33,6 +32,17 @@ function C = scw_curvature(R, varargin)
 %                 are averaged in the SAME theta segments used for the
 %                 curvature, so curvature and cortex signal can be compared
 %                 segment for segment.
+%     6. DELTA-R  Cortex-enriched retardance = cortical minus the matched
+%                 subcortical segment (removes non-cortical signal and
+%                 common-mode optical drift), then minus the per-segment
+%                 MEDIAN over the metaphase reference frames (removes
+%                 uneven starting birefringence, cortical thickness and
+%                 illumination). The result, retRelNm = DeltaR(theta,t),
+%                 is the retardance kymograph. SCW retardance strength is
+%                 the background-corrected mean-square change
+%                    S_R = <DeltaR^2>_SCW - <DeltaR^2>_metaphase
+%                 over equal-duration windows, and the noise-corrected RMS
+%                 amplitude is sqrt(max(0, S_R)).
 %
 %   The segment grid is fixed from the first usable frame (M segments of
 %   ~SegUm arc at theta = 0, 360/M, 2*360/M, ... degrees, theta measured
@@ -41,11 +51,23 @@ function C = scw_curvature(R, varargin)
 %   registered. The outline is assumed star-shaped about its centroid
 %   (r(theta) single-valued), which holds for oocytes.
 %
+%   Caveats. Registration is by the per-frame centroid, which corrects
+%   translation but NOT rotation: if the oocyte rotates during the
+%   recording (constant-slope streaks across the full kymograph that the
+%   wave itself cannot explain), rigidly register the frames first.
+%   And retardance is path-integrated birefringence, so DeltaR reports
+%   changes in cortical organisation, thickness or orientation - it is not
+%   automatically proportional to actomyosin concentration.
+%
 %   Options (name-value)
 %     'SegUm'      arc length per curvature segment, um     default 2
 %     'SmoothUm'   arc window of the piecewise poly fit, um default 16
 %     'PolyOrder'  order of the local polynomial (>= 2)     default 3
-%     'RefFrames'  frame number(s) for relative curvature   default first ok
+%     'RefFrames'  reference frame number(s) for relative curvature and
+%                  retardance. Default: the QC-ok frames inside BgWindow
+%                  when one is given, else the first 5 QC-ok frames -
+%                  several stable metaphase frames beat a single first
+%                  frame because retardance is noisier than curvature.
 %     'ScwWindow'  [t0 t1] min containing the SCW           default [] (skip)
 %     'BgWindow'   [t0 t1] min in metaphase, same duration  default [] (auto)
 %     'RhoCapUm'   cap on |radius of curvature|, um         default 250
@@ -61,10 +83,16 @@ function C = scw_curvature(R, varargin)
 %     rho          radius of curvature, signed, capped (um)
 %     cortNm       mean cortical retardance per segment (nm)
 %     subNm        mean subcortical retardance per segment (nm)
+%     retNetNm     cortical minus matched subcortical segment (nm)
+%     retRelNm     DeltaR: retNetNm minus the reference median (nm)
 %     rhoVarTime   nF x 1  var of rho across segments per frame (um^2)
+%     retSpatialVarTime  nF x 1  var of DeltaR across segments (nm^2)
+%     retMsTime    nF x 1  mean DeltaR^2 across segments (nm^2)
 %     scw          struct: window, bgWindow, varScw, varBg, strengthUm2,
 %                  strengthSegUm2 (1 x M, per-segment temporal variance
 %                  difference), nScw, nBg
+%     retardance   struct: msScwNm2, msBgNm2, strengthNm2 (S_R), rmsNm
+%                  (sqrt(max(0,S_R))), strengthSegNm2 (1 x M)
 %     frames, timeMin, ok, refFrames, smoothUmUsed
 %
 %   Typical use:
@@ -164,9 +192,16 @@ for k = 1:nF
     end
 end
 
-% ---- relative curvature: subtract the reference frame's curvature
+% ---- reference frames: several stable metaphase frames, not a single one,
+% because the retardance reference below is noisier than the outline
 if isempty(o.RefFrames)
-    refIdx = k0;
+    if ~isempty(o.BgWindow)
+        refIdx = find(R.timeMin >= o.BgWindow(1) & ...
+                      R.timeMin <= o.BgWindow(2) & R.ok & haveSnake);
+    else
+        refIdx = find(R.ok & haveSnake, 5);
+    end
+    if isempty(refIdx), refIdx = k0; end
 else
     refIdx = find(ismember(R.frames, o.RefFrames));
     if isempty(refIdx)
@@ -174,7 +209,22 @@ else
     end
 end
 C.refFrames = R.frames(refIdx);
-C.kappaRel  = C.kappa - mean(C.kappa(refIdx,:), 1, 'omitnan');
+
+% ---- relative curvature: subtract the reference curvature
+C.kappaRel = C.kappa - mean(C.kappa(refIdx,:), 1, 'omitnan');
+
+% ---- cortex-enriched retardance, relative to the metaphase reference.
+% cort - matched sub removes non-cortical signal and common-mode optical
+% drift; subtracting the per-segment reference median removes uneven
+% starting birefringence, cortical thickness and illumination.
+if any(isfinite(C.subNm(:)))
+    C.retNetNm = C.cortNm - C.subNm;
+else
+    C.retNetNm = C.cortNm;
+end
+C.retRelNm = C.retNetNm - median(C.retNetNm(refIdx,:), 1, 'omitnan');
+C.retSpatialVarTime = var(C.retRelNm, 0, 2, 'omitnan');
+C.retMsTime = mean(C.retRelNm.^2, 2, 'omitnan');
 
 % ---- radii of curvature, capped, and their spread
 C.rho = 1 ./ C.kappa;
@@ -186,6 +236,8 @@ C.rhoVarTime = var(C.rho, 0, 2, 'omitnan');
 C.scw = struct('window', o.ScwWindow, 'bgWindow', o.BgWindow, ...
                'varScw', NaN, 'varBg', NaN, 'strengthUm2', NaN, ...
                'strengthSegUm2', nan(1, M), 'nScw', 0, 'nBg', 0);
+C.retardance = struct('msScwNm2', NaN, 'msBgNm2', NaN, 'strengthNm2', NaN, ...
+                      'rmsNm', NaN, 'strengthSegNm2', nan(1, M));
 if ~isempty(o.ScwWindow)
     bg = o.BgWindow;
     if isempty(bg)
@@ -210,6 +262,15 @@ if ~isempty(o.ScwWindow)
         C.scw.varBg  = var(vB(:), 0, 'omitnan');
         C.scw.strengthUm2 = C.scw.varScw - C.scw.varBg;
         C.scw.strengthSegUm2 = var(vS, 0, 1, 'omitnan') - var(vB, 0, 1, 'omitnan');
+
+        % retardance strength: background-corrected mean-square DeltaR
+        xS = C.retRelNm(inS,:);  xB = C.retRelNm(inB,:);
+        C.retardance.msScwNm2 = mean(xS(:).^2, 'omitnan');
+        C.retardance.msBgNm2  = mean(xB(:).^2, 'omitnan');
+        C.retardance.strengthNm2 = C.retardance.msScwNm2 - C.retardance.msBgNm2;
+        C.retardance.rmsNm = sqrt(max(0, C.retardance.strengthNm2));
+        C.retardance.strengthSegNm2 = mean(xS.^2, 1, 'omitnan') ...
+                                    - mean(xB.^2, 1, 'omitnan');
     end
 end
 
@@ -222,6 +283,12 @@ if ~isempty(o.ScwWindow) && isfinite(C.scw.strengthUm2)
              '(%d and %d frames)\n'], C.scw.varScw, o.ScwWindow(1), ...
             o.ScwWindow(2), C.scw.varBg, C.scw.bgWindow(1), ...
             C.scw.bgWindow(2), C.scw.strengthUm2, C.scw.nScw, C.scw.nBg);
+end
+if ~isempty(o.ScwWindow) && isfinite(C.retardance.strengthNm2)
+    fprintf(['SCW retardance strength: <dR^2> %.3g nm^2 minus %.3g nm^2 ' ...
+             'background = %.3g nm^2, rms amplitude %.3g nm\n'], ...
+            C.retardance.msScwNm2, C.retardance.msBgNm2, ...
+            C.retardance.strengthNm2, C.retardance.rmsNm);
 end
 
 if ~isempty(o.OutDir), exportCsv(C, R, o); end
@@ -250,26 +317,32 @@ T = table(repelem(C.frames(:), M), repelem(C.timeMin(:), M), ...
           reshape(C.rUm', [], 1), reshape(C.kappa', [], 1), ...
           reshape(C.kappaRel', [], 1), reshape(C.rho', [], 1), ...
           reshape(C.cortNm', [], 1), reshape(C.subNm', [], 1), ...
+          reshape(C.retNetNm', [], 1), reshape(C.retRelNm', [], 1), ...
           repelem(C.ok(:), M), ...
     'VariableNames', {'frame','time_min','segment','theta_deg','r_um', ...
         'kappa_per_um','kappa_rel_per_um','rho_um','cortical_nm', ...
-        'subcortical_nm','qc_ok'});
+        'subcortical_nm','ret_net_nm','ret_rel_nm','qc_ok'});
 writetable(T, fullfile(o.OutDir, 'scw_curvature_segments.csv'));
 
 F = table(C.frames(:), C.timeMin(:), C.rhoVarTime(:), ...
           mean(C.kappa, 2, 'omitnan'), mean(C.cortNm, 2, 'omitnan'), ...
-          mean(C.subNm, 2, 'omitnan'), C.ok(:), ...
+          mean(C.subNm, 2, 'omitnan'), C.retMsTime(:), ...
+          C.retSpatialVarTime(:), C.ok(:), ...
     'VariableNames', {'frame','time_min','rho_var_um2','kappa_mean_per_um', ...
-        'cortical_mean_nm','subcortical_mean_nm','qc_ok'});
+        'cortical_mean_nm','subcortical_mean_nm','ret_ms_nm2', ...
+        'ret_spatial_var_nm2','qc_ok'});
 writetable(F, fullfile(o.OutDir, 'scw_curvature_frames.csv'));
 
 if isfinite(C.scw.strengthUm2)
     W = table(C.scw.window(1), C.scw.window(2), C.scw.bgWindow(1), ...
               C.scw.bgWindow(2), C.scw.varScw, C.scw.varBg, ...
-              C.scw.strengthUm2, C.scw.nScw, C.scw.nBg, ...
+              C.scw.strengthUm2, C.retardance.msScwNm2, ...
+              C.retardance.msBgNm2, C.retardance.strengthNm2, ...
+              C.retardance.rmsNm, C.scw.nScw, C.scw.nBg, ...
         'VariableNames', {'scw_t0_min','scw_t1_min','bg_t0_min','bg_t1_min', ...
-            'var_scw_um2','var_bg_um2','strength_um2','n_frames_scw', ...
-            'n_frames_bg'});
+            'var_scw_um2','var_bg_um2','strength_um2','ret_ms_scw_nm2', ...
+            'ret_ms_bg_nm2','ret_strength_nm2','ret_rms_nm', ...
+            'n_frames_scw','n_frames_bg'});
     writetable(W, fullfile(o.OutDir, 'scw_strength.csv'));
 end
 fprintf('wrote CSVs to %s\n', o.OutDir);
@@ -282,10 +355,10 @@ um = 1/R.pxPerUm;
 
 f = findobj('Type','figure','Tag','scw_curv');
 if isempty(f)
-    f = figure('Color','k','Position',[60 60 1500 820],'Tag','scw_curv');
+    f = figure('Color','k','Position',[60 40 1500 980],'Tag','scw_curv');
 else, figure(f); clf(f);
 end
-tiledlayout(2,3,'Padding','compact','TileSpacing','compact');
+tiledlayout(3,3,'Padding','compact','TileSpacing','compact');
 
 % 1 -- reference outline coloured by curvature
 nexttile;
@@ -314,21 +387,42 @@ title('relative curvature \Delta\kappa (1/um): red = locally contracted', 'Color
 nexttile;
 plot(t, C.rhoVarTime, 'c', 'LineWidth', 1.4); hold on;
 plot(t(~C.ok), C.rhoVarTime(~C.ok), 'r.', 'MarkerSize', 10);
-yl = ylim;
-shade = @(w, col) patch([w(1) w(2) w(2) w(1)], [yl(1) yl(1) yl(2) yl(2)], ...
-    col, 'FaceAlpha', 0.18, 'EdgeColor', 'none');
-if ~isempty(C.scw.window),   shade(C.scw.window,   [1 .3 .3]); end
-if ~isempty(C.scw.bgWindow), shade(C.scw.bgWindow, [.3 .5 1]); end
+shadeWindows(C);
 set(gca,'Color','k','XColor','w','YColor','w');
 xlabel('time (min)'); ylabel('var(\rho) across segments (um^2)');
 if isfinite(C.scw.strengthUm2)
-    title(sprintf('SCW strength = %.1f um^2', C.scw.strengthUm2), 'Color','w');
+    title(sprintf('SCW curvature strength = %.1f um^2', C.scw.strengthUm2), 'Color','w');
 else
     title('var of radii of curvature (pick ScwWindow here)', 'Color','w');
 end
 
-% 4 -- cortical retardance in the same segments
+% 4 -- relative retardance DeltaR kymograph, same segments
 nexttile([1 2]);
+K = C.retRelNm;
+imagesc(th, t, K, 'AlphaData', ~isnan(K)); set(gca,'Color','k');
+colormap(gca, divMap(256));
+m = prctile(abs(K(~isnan(K))), 98);
+if isfinite(m) && m > 0, clim([-m m]); end
+set(gca,'XColor','w','YColor','w'); colorbar('Color','w');
+xlabel('theta (deg)'); ylabel('time (min)');
+title('\DeltaR (nm): cortex-enriched retardance minus metaphase reference', 'Color','w');
+
+% 5 -- mean-square DeltaR over time, with the analysis windows
+nexttile;
+plot(t, C.retMsTime, 'c', 'LineWidth', 1.4); hold on;
+plot(t(~C.ok), C.retMsTime(~C.ok), 'r.', 'MarkerSize', 10);
+shadeWindows(C);
+set(gca,'Color','k','XColor','w','YColor','w');
+xlabel('time (min)'); ylabel('<\DeltaR^2> across segments (nm^2)');
+if isfinite(C.retardance.strengthNm2)
+    title(sprintf('S_R = %.3g nm^2, rms %.3g nm', ...
+        C.retardance.strengthNm2, C.retardance.rmsNm), 'Color','w');
+else
+    title('mean-square \DeltaR (pick ScwWindow here)', 'Color','w');
+end
+
+% 6 -- cortical retardance in the same segments
+nexttile;
 K = C.cortNm;
 imagesc(th, t, K, 'AlphaData', ~isnan(K)); set(gca,'Color','k');
 colormap(gca, hot);
@@ -336,9 +430,9 @@ cl = prctile(K(~isnan(K)), [2 98]);
 if numel(cl) == 2 && cl(2) > cl(1), clim(cl); end
 set(gca,'XColor','w','YColor','w'); colorbar('Color','w');
 xlabel('theta (deg)'); ylabel('time (min)');
-title('cortical retardance in curvature segments (nm)', 'Color','w');
+title('cortical retardance (nm)', 'Color','w');
 
-% 5 -- subcortical retardance, or per-segment strength if computed
+% 7 -- subcortical retardance, or per-segment strength if computed
 nexttile;
 if any(isfinite(C.subNm(:)))
     K = C.subNm;
@@ -353,10 +447,20 @@ elseif any(isfinite(C.scw.strengthSegUm2))
     plot(th, C.scw.strengthSegUm2, 'c', 'LineWidth', 1.4);
     set(gca,'Color','k','XColor','w','YColor','w');
     xlabel('theta (deg)'); ylabel('strength (um^2)');
-    title('per-segment SCW strength', 'Color','w');
+    title('per-segment SCW curvature strength', 'Color','w');
 else
     axis off;
 end
+end
+
+
+function shadeWindows(C)
+%SHADEWINDOWS  Mark the SCW (red) and background (blue) windows on gca.
+yl = ylim;
+shade = @(w, col) patch([w(1) w(2) w(2) w(1)], [yl(1) yl(1) yl(2) yl(2)], ...
+    col, 'FaceAlpha', 0.18, 'EdgeColor', 'none');
+if ~isempty(C.scw.window),   shade(C.scw.window,   [1 .3 .3]); end
+if ~isempty(C.scw.bgWindow), shade(C.scw.bgWindow, [.3 .5 1]); end
 end
 
 

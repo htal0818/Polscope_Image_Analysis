@@ -30,6 +30,43 @@ contraction waves in oocytes*, Nat Commun 8:849 (2017):
 | SCW strength = var(radii of curvature during SCW) − var during an equal metaphase window | `C.scw.strengthUm2 = var(ρ in ScwWindow) − var(ρ in BgWindow)`, ρ = 1/κ capped at `RhoCapUm` so near-flat segments cannot dominate the variance. Also reported per segment (`strengthSegUm2`) and per frame (`rhoVarTime`, useful for locating the wave). | `scw_curvature.m` step 4 |
 | Cortical and subcortical intensity in a ring, same segments as the curvature | `scw_cortex` samples retardance along each contour normal, subtracts a per-θ cytoplasm baseline, and keeps two rings per contour point: cortical (|d| ≤ `BandPx`) and subcortical (−`SubDepthPx` ≤ d < −`BandPx`). `scw_curvature` averages both in exactly the θ segments used for the curvature (`C.cortNm`, `C.subNm`). | `scw_cortex.m` step 4, `scw_curvature.m` step 5 |
 
+## Retardance quantification (ΔR and S_R)
+
+On top of the raw ring signals, `scw_curvature` builds a relative retardance
+kymograph and a strength metric symmetrical to the curvature one:
+
+1. **Cortex-enriched retardance** — each cortical segment minus its matched
+   subcortical segment (`C.retNetNm = C.cortNm − C.subNm`). This removes
+   non-cortical signal and common-mode optical drift.
+2. **Relative retardance ΔR(θ,t)** — minus the per-segment **median** over the
+   metaphase reference frames (`C.retRelNm`). This removes uneven starting
+   birefringence, cortical thickness and illumination. The reference defaults
+   to the QC-ok frames inside `BgWindow` (or the first 5 QC-ok frames if no
+   window is given) — several stable metaphase frames beat a single first
+   frame because retardance is noisier than outline curvature.
+3. **SCW retardance strength** — the background-corrected mean-square change
+   over equal-duration windows,
+
+   S_R = ⟨ΔR²⟩_SCW − ⟨ΔR²⟩_metaphase ,
+
+   with the noise-corrected RMS amplitude √max(0, S_R) (`C.retardance`:
+   `strengthNm2`, `rmsNm`, per-segment `strengthSegNm2`; per-frame trace
+   `C.retMsTime`, spatial heterogeneity `C.retSpatialVarTime`).
+
+Curvature and retardance live on the same registered θ grid, so their spatial
+and temporal coupling can be examined directly, segment for segment.
+
+### Interpretation caveats
+
+* Registration is by the per-frame centroid: **translation is corrected,
+  rotation is not**. If the oocyte rotates during the recording (kymograph
+  streaks with a constant slope across all θ that the wave cannot explain),
+  rigidly register the frames before running the pipeline.
+* Retardance is **path-integrated birefringence**: ΔR reports changes in
+  cortical organisation, thickness or filament orientation relative to the
+  optical axis — it is not automatically proportional to actomyosin
+  concentration.
+
 ## Usage
 
 ```matlab
