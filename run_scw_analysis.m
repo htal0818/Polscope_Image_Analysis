@@ -24,7 +24,8 @@ R = scw_cortex(src);
 C = scw_curvature(R);
 
 % Second pass with the SCW window and an equal-duration metaphase window,
-% writing the CSVs next to the data:
+% writing the CSVs next to the data. Add 'DeRotate',true if the kymographs
+% show constant-slope streaks across all theta (the oocyte rotating):
 % C = scw_curvature(R, 'ScwWindow', [30 55], 'BgWindow', [0 25], ...
 %                      'OutDir', fullfile(src, 'scw_output'));
 

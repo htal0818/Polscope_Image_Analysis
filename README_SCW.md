@@ -58,10 +58,23 @@ and temporal coupling can be examined directly, segment for segment.
 
 ### Interpretation caveats
 
-* Registration is by the per-frame centroid: **translation is corrected,
-  rotation is not**. If the oocyte rotates during the recording (kymograph
-  streaks with a constant slope across all θ that the wave cannot explain),
-  rigidly register the frames before running the pipeline.
+* Registration is by the per-frame centroid: **translation is corrected;
+  rotation only if you ask for it**. If the oocyte rotates during the
+  recording (kymograph streaks with a constant slope across all θ that the
+  wave cannot explain), pass `'DeRotate', true`. Rotation is estimated per
+  frame by circular cross-correlation of the r(θ) profile against the
+  reference frame, with the peak search confined to ±10° around the previous
+  frame's estimate — rotation is slow and continuous, which keeps the tracker
+  on the rotation branch and immune to the two-fold ambiguity of a
+  near-elliptical outline. Frames inside `ScwWindow` are excluded and bridged
+  by interpolation so the wave itself cannot read as rotation (always pass
+  `ScwWindow` with `DeRotate`). The estimate is median-smoothed over
+  `DeRotateSmooth` frames (default 9) and applied as whole-segment shifts of
+  the θ grid; the applied angle is stored in `C.rotDeg` and the frames CSV.
+  Validated on a synthetic worst case (wave amplitude larger than the static
+  shape signature, on the same harmonic): 0.8° rms error, max 1.6° — below
+  one 2 µm segment (≈2°). Needs a persistent shape signature: a nearly
+  circular outline (r(θ) sd < 0.05 µm) is rejected with a warning.
 * Retardance is **path-integrated birefringence**: ΔR reports changes in
   cortical organisation, thickness or filament orientation relative to the
   optical axis — it is not automatically proportional to actomyosin

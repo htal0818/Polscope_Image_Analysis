@@ -52,9 +52,19 @@ function C = scw_curvature(R, varargin)
 %   (r(theta) single-valued), which holds for oocytes.
 %
 %   Caveats. Registration is by the per-frame centroid, which corrects
-%   translation but NOT rotation: if the oocyte rotates during the
+%   translation but NOT rotation. If the oocyte rotates during the
 %   recording (constant-slope streaks across the full kymograph that the
-%   wave itself cannot explain), rigidly register the frames first.
+%   wave itself cannot explain), set 'DeRotate',true: each frame's r(theta)
+%   profile is circularly cross-correlated against the reference frame's,
+%   with the peak search confined to +-10 deg around the previous frame's
+%   estimate (rotation is slow and continuous, which also resolves the
+%   two-fold ambiguity of near-elliptical outlines), median-smoothed over
+%   'DeRotateSmooth' frames, and applied as a whole-segment shift of the
+%   theta grid. Frames inside ScwWindow are excluded from the estimate and
+%   bridged by interpolation, so a strong wave cannot read as transient
+%   rotation - give ScwWindow whenever you use DeRotate. De-rotation needs
+%   a persistent shape signature; a nearly circular outline (r(theta) sd
+%   < 0.05 um) is rejected with a warning.
 %   And retardance is path-integrated birefringence, so DeltaR reports
 %   changes in cortical organisation, thickness or orientation - it is not
 %   automatically proportional to actomyosin concentration.
@@ -71,6 +81,9 @@ function C = scw_curvature(R, varargin)
 %     'ScwWindow'  [t0 t1] min containing the SCW           default [] (skip)
 %     'BgWindow'   [t0 t1] min in metaphase, same duration  default [] (auto)
 %     'RhoCapUm'   cap on |radius of curvature|, um         default 250
+%     'DeRotate'   rigidly de-rotate the theta grid         default false
+%     'DeRotateSmooth' median window for the rotation
+%                  estimate, frames                         default 9
 %     'OutDir'     write CSVs here                          default '' (skip)
 %     'Plot'       summary figure                           default true
 %
@@ -88,6 +101,8 @@ function C = scw_curvature(R, varargin)
 %     rhoVarTime   nF x 1  var of rho across segments per frame (um^2)
 %     retSpatialVarTime  nF x 1  var of DeltaR across segments (nm^2)
 %     retMsTime    nF x 1  mean DeltaR^2 across segments (nm^2)
+%     rotDeg       nF x 1  de-rotation applied (deg, toward increasing
+%                  theta; zeros unless 'DeRotate' is set)
 %     scw          struct: window, bgWindow, varScw, varBg, strengthUm2,
 %                  strengthSegUm2 (1 x M, per-segment temporal variance
 %                  difference), nScw, nBg
@@ -109,6 +124,8 @@ p.addParameter('RefFrames', []);
 p.addParameter('ScwWindow', []);
 p.addParameter('BgWindow',  []);
 p.addParameter('RhoCapUm', 250);
+p.addParameter('DeRotate', false);
+p.addParameter('DeRotateSmooth', 9);
 p.addParameter('OutDir',   '');
 p.addParameter('Plot',     true);
 p.parse(varargin{:});
@@ -189,6 +206,77 @@ for k = 1:nF
     else
         C.cortNm(k,:) = accumarray(bi, R.kymo(k,:)',   [M 1], ...
                                    @(v) mean(v,'omitnan'), NaN)';
+    end
+end
+
+% ---- optional rigid de-rotation of the theta grid.
+% Rotation is estimated per frame by circular cross-correlation of the
+% mean-subtracted r(theta) profile against the reference frame's, with the
+% peak search confined to +-10 deg around the previous frame's estimate:
+% rotation is slow and continuous, so this keeps the tracker on the
+% rotation branch, immune to the two-fold ambiguity of a near-elliptical
+% outline and to the wave's own correlation peak elsewhere in theta.
+% Frames inside ScwWindow are bridged by interpolation because a wave
+% stronger than the static shape signature would otherwise read as a
+% transient rotation of up to tens of degrees.
+C.rotDeg = zeros(nF, 1);
+if o.DeRotate
+    refProf = C.rUm(k0,:)' - mean(C.rUm(k0,:), 'omitnan');
+    refProf(~isfinite(refProf)) = 0;
+    if std(refProf) < 0.05
+        warning('scw:deRotate', ['Outline is nearly circular (r(theta) sd ' ...
+            '%.3f um), so rotation cannot be estimated from shape; ' ...
+            'DeRotate skipped.'], std(refProf));
+    else
+        if isempty(o.ScwWindow)
+            warning('scw:deRotate', ['DeRotate without ScwWindow: a strong ' ...
+                'wave can read as transient rotation. Pass ScwWindow so ' ...
+                'those frames are bridged by interpolation instead.']);
+        end
+        W = max(3, round(M * 10/360));         % +-10 deg search window
+        raw = nan(nF, 1);  prev = 0;
+        for k = 1:nF
+            prof = C.rUm(k,:)';
+            if all(~isfinite(prof)), continue; end
+            prof = prof - mean(prof, 'omitnan');
+            prof(~isfinite(prof)) = 0;
+            cc = zeros(M, 1);
+            for s = 0:M-1
+                cc(s+1) = refProf' * circshift(prof, -s);
+            end
+            cand = round(prev) + (-W:W);
+            [~, j] = max(cc(mod(cand, M) + 1));
+            im = cand(j);
+            c1 = cc(mod(im-1, M)+1); c2 = cc(mod(im, M)+1); c3 = cc(mod(im+1, M)+1);
+            den = c1 - 2*c2 + c3;
+            fr = 0;
+            if den < 0, fr = 0.5*(c1-c3)/den; end
+            raw(k) = im + fr;
+            prev = raw(k);
+        end
+        if ~isempty(o.ScwWindow)
+            excl = R.timeMin >= o.ScwWindow(1) & R.timeMin <= o.ScwWindow(2);
+            keep = ~excl & isfinite(raw);
+            if any(excl) && nnz(keep) >= 2
+                raw(excl) = interp1(find(keep), raw(keep), find(excl), ...
+                                    'linear', 'extrap');
+            end
+        end
+        u = movmedian(raw, max(1, o.DeRotateSmooth), 'omitnan');
+        u(~isfinite(u)) = 0;
+        shiftSeg = round(u);
+        for k = 1:nF
+            if shiftSeg(k) ~= 0
+                C.rUm(k,:)    = circshift(C.rUm(k,:),    -shiftSeg(k), 2);
+                C.kappa(k,:)  = circshift(C.kappa(k,:),  -shiftSeg(k), 2);
+                C.cortNm(k,:) = circshift(C.cortNm(k,:), -shiftSeg(k), 2);
+                C.subNm(k,:)  = circshift(C.subNm(k,:),  -shiftSeg(k), 2);
+            end
+        end
+        C.rotDeg = u * 360/M;
+        fprintf(['de-rotation: %.1f to %.1f deg over the recording, ' ...
+                 '%d frames shifted (grid step %.2f deg)\n'], ...
+                min(C.rotDeg), max(C.rotDeg), nnz(shiftSeg ~= 0), 360/M);
     end
 end
 
@@ -327,10 +415,10 @@ writetable(T, fullfile(o.OutDir, 'scw_curvature_segments.csv'));
 F = table(C.frames(:), C.timeMin(:), C.rhoVarTime(:), ...
           mean(C.kappa, 2, 'omitnan'), mean(C.cortNm, 2, 'omitnan'), ...
           mean(C.subNm, 2, 'omitnan'), C.retMsTime(:), ...
-          C.retSpatialVarTime(:), C.ok(:), ...
+          C.retSpatialVarTime(:), C.rotDeg(:), C.ok(:), ...
     'VariableNames', {'frame','time_min','rho_var_um2','kappa_mean_per_um', ...
         'cortical_mean_nm','subcortical_mean_nm','ret_ms_nm2', ...
-        'ret_spatial_var_nm2','qc_ok'});
+        'ret_spatial_var_nm2','rot_deg','qc_ok'});
 writetable(F, fullfile(o.OutDir, 'scw_curvature_frames.csv'));
 
 if isfinite(C.scw.strengthUm2)
