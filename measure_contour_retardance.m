@@ -151,6 +151,10 @@ function result = measure_contour_retardance(Iraw, opts)
             result.ridgeResponse = ridgeResponse;
             return;
         end
+        [~, iLongest] = max(cellfun(@(p) size(p,1), B));
+        bnd = B{iLongest};
+        yb = bnd(:,1);
+        xb = bnd(:,2);
     end
 
     %% Extract boundary contour
@@ -160,22 +164,11 @@ function result = measure_contour_retardance(Iraw, opts)
         result.ridgeResponse = ridgeResponse;
         return;
     end
-    [~, iLongest] = max(cellfun(@(p) size(p,1), B));
-    bnd = B{iLongest};
-    yb = bnd(:,1);
-    xb = bnd(:,2);
 
-    %% Circle fit for center & radius
-    [R_fit, xc, yc] = circfit(xb, yb);
+    xb = xb + opts.boundaryInset_px * nx;
+    yb = yb + opts.boundaryInset_px * ny;
 
-    % Shrink boundary inward onto cortical ring center
-    dx = xb - xc;  dy = yb - yc;
-    dist = sqrt(dx.^2 + dy.^2);
-    shrink = max(dist - opts.boundaryInset_px, 1) ./ dist;
-    xb = xc + dx .* shrink;
-    yb = yc + dy .* shrink;
-
-    %% Interpolate retardance (nm) at boundary pixel locations
+    %% Interpolate retardance (nm) at the inset boundary locations
     F = griddedInterpolant({1:H, 1:W}, Iret, 'linear', 'nearest');
     ib = F(yb, xb);
 

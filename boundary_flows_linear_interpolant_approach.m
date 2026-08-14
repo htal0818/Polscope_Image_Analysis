@@ -35,8 +35,19 @@ if useFourStates
     d2 = dir(s2); d3 = dir(s3); d4 = dir(s4);
 end
 
+% --- Drop hidden / macOS AppleDouble / non-image files from the listings ---
+% Fixes "Unable to determine the file format" from imread when a folder
+% contains e.g. .DS_Store or ._StateN_* sidecars, which dir() otherwise picks up.
+d1 = filter_image_dir(d1);
+if useFourStates
+    d2 = filter_image_dir(d2);
+    d3 = filter_image_dir(d3);
+    d4 = filter_image_dir(d4);
+end
+
 % --- PIVlab output .mat file ---
-pivMatFile = '/Users/hridaytalreja/Desktop/Jan_data_2026/jan_20_2026_FSW_and_eggs_50msexp_15sint_20x_50nmceiling/eggs/SMS_2026_0120_1518_1/Pos0/Jan21_2026_PIV/PIVlab_output.mat';
+% --- PIVlab data: read from workspace (run PIVlab first) ---
+% Expects: u_original, v_original, x, y in workspace
 
 % --- Optional crop (match your workflows) ---
 doCrop = true;
@@ -59,7 +70,7 @@ sigmaBlur       = 1.0;           % pre-blur (pixels)
 threshFrac      = 0.85;          % mask = I < threshFrac*mean2(I)
 se              = strel('diamond',5);
 polyOrder       = 50;            % polyfit order for r(theta)
-nBoundary       = 500;           % samples along boundary (NO upsampling needed now)
+nBoundary       = 500;           % kept for signature compatibility (boundary uses native resolution)
 
 % --- Theta binning for output compatibility ---
 % Note: With analytical approach, we have 500 direct values at known theta
@@ -106,9 +117,8 @@ makeEnhancedKymographs = true;
 makeSnapshotPlots = true;
 snapshotEveryNFrames = 2;
 
-%% ========================== LOAD PIV DATA =================================
-S = load(pivMatFile);
-[Xc, Yc, Uc, Vc] = pickPIVFields(S);
+%% ========================== PIV DATA FROM WORKSPACE ======================
+Uc = u_original; Vc = v_original; Xc = x; Yc = y;
 
 nFramesPIV = numel(Uc);
 nFramesImg = numel(d1);
@@ -116,9 +126,9 @@ nFrames = min(nFramesPIV, nFramesImg);
 fprintf('Frames: images=%d, piv=%d, using=%d\n', nFramesImg, nFramesPIV, nFrames);
 
 %% ========================== PREALLOCATE ===================================
-% Raw tangential velocity at 500 boundary points (no binning)
-Vtheta_raw = nan(nFrames, nBoundary);       % tangential velocity at each boundary point
-Theta_raw = nan(nFrames, nBoundary);        % theta values for each boundary point
+% Raw tangential velocity at each boundary point (variable length per frame)
+Vtheta_raw = cell(nFrames, 1);
+Theta_raw  = cell(nFrames, 1);
 
 % Binned output (for compatibility with original approach)
 Vtheta_kymo = nan(nFrames, nThetaBins);
@@ -153,14 +163,30 @@ visImageSeq = cell(nFrames,1);
 for fr = 1:nFrames
 
     %% ----- Load PolScope intensity image -----
-    a1 = double(imread(fullfile(d1(fr).folder, d1(fr).name)));
-    if useFourStates
-        a2 = double(imread(fullfile(d2(fr).folder, d2(fr).name)));
-        a3 = double(imread(fullfile(d3(fr).folder, d3(fr).name)));
-        a4 = double(imread(fullfile(d4(fr).folder, d4(fr).name)));
-        Iraw = a1 + a2 + a3 + a4;
-    else
-        Iraw = a1;
+    try
+        a1 = double(imread(fullfile(d1(fr).folder, d1(fr).name)));
+        if useFourStates
+            a2 = double(imread(fullfile(d2(fr).folder, d2(fr).name)));
+            a3 = double(imread(fullfile(d3(fr).folder, d3(fr).name)));
+            a4 = double(imread(fullfile(d4(fr).folder, d4(fr).name)));
+            Iraw = a1 + a2 + a3 + a4;
+        else
+            Iraw = a1;
+        end
+    catch ME
+        badList = {fullfile(d1(fr).folder, d1(fr).name)};
+        if useFourStates
+            badList = [badList, ...
+                {fullfile(d2(fr).folder, d2(fr).name), ...
+                 fullfile(d3(fr).folder, d3(fr).name), ...
+                 fullfile(d4(fr).folder, d4(fr).name)}];
+        end
+        fprintf(2, 'Frame %d: imread failed (%s). Candidate files:\n', fr, ME.message);
+        for kk = 1:numel(badList)
+            fprintf(2, '    %s\n', badList{kk});
+        end
+        fprintf(2, '  -> skipping frame %d.\n', fr);
+        continue;
     end
 
     if doCrop
@@ -277,9 +303,9 @@ for fr = 1:nFrames
         normalOffsetPx, nThetaBins, thetaBinEdges, ...
         px_per_um, dt_sec, pivVelUnit);
 
-    % Store raw (500 points) and binned outputs
-    Vtheta_raw(fr,:) = vT_raw;
-    Theta_raw(fr,:) = theta_raw;
+    % Store raw (variable-length) and binned outputs
+    Vtheta_raw{fr} = vT_raw;
+    Theta_raw{fr} = theta_raw;
     Vtheta_kymo(fr,:) = vBins;
     Npts_kymo(fr,:)   = nBinsCount;
 
@@ -303,7 +329,8 @@ for fr = 1:nFrames
         plot(poly(:,1), poly(:,2), 'c-', 'LineWidth', 2);
         scatter(dbgFlow.sampleX, dbgFlow.sampleY, 8, 'r', 'filled');
         % Show tangent vectors at a few points
-        subsamp = 1:20:nBoundary;
+        nPts = size(poly,1);
+        subsamp = 1:max(1,round(nPts/25)):nPts;
         quiver(poly(subsamp,1), poly(subsamp,2), tx(subsamp)*20, ty(subsamp)*20, 0, 'g', 'LineWidth', 1);
         title(sprintf('Frame %d: Boundary + Sample Points + Tangents', fr));
         legend({'Boundary', 'Sample pts', 'Tangents'}, 'Location', 'best');
@@ -333,16 +360,24 @@ time_min = (0:nFrames-1) * (dt_sec/60);
 
 fprintf('Generating visualizations...\n');
 
-% --- 1) RAW TANGENTIAL VELOCITY (500 points, no binning) ---
+% --- 1) RAW TANGENTIAL VELOCITY (variable-length, interpolated to common grid) ---
+nRawDisplay = 500;  % display resolution for raw kymograph
+Vtheta_raw_grid = nan(nFrames, nRawDisplay);
+for fr = 1:nFrames
+    vr = Vtheta_raw{fr};
+    if ~isempty(vr)
+        Vtheta_raw_grid(fr,:) = interp1(linspace(0,1,numel(vr)), vr, linspace(0,1,nRawDisplay), 'linear');
+    end
+end
 fig0 = figure('Position', [100 100 1200 600]);
 subplot(1,2,1);
-imagesc(1:nBoundary, time_min, Vtheta_raw);
+imagesc(1:nRawDisplay, time_min, Vtheta_raw_grid);
 axis tight;
 xlabel('Boundary Point Index', 'FontSize', 12);
 ylabel('Time (min)', 'FontSize', 12);
-title('Raw Tangential Velocity (500 pts, analytical tangents)', 'FontSize', 12);
+title('Raw Tangential Velocity (native resolution)', 'FontSize', 12);
 colormap(gca, redblue(256));
-vmax = max(abs(Vtheta_raw(:)), [], 'omitnan');
+vmax = max(abs(Vtheta_raw_grid(:)), [], 'omitnan');
 if ~isnan(vmax) && vmax > 0; clim([-vmax, vmax]); end
 cb = colorbar; ylabel(cb, 'v_\theta (\mum/s)', 'FontSize', 11);
 
@@ -473,6 +508,11 @@ if makeQuiverOverlays
         vq = zeros(nQuiver, 1);
         vq_color = zeros(nQuiver, 1);
 
+        % Precompute boundary-point angles once per frame for nearest-theta
+        % lookup. This places arrow anchors on the actual boundary polygon,
+        % not at a faulty "mean radius of curvature" distance.
+        theta_poly = mod(atan2(poly(:,2) - yc, poly(:,1) - xc), 2*pi);
+
         for k = 1:nQuiver
             idx = thetaSubsample(k);
             theta_k = thetaCenters(idx);
@@ -483,11 +523,10 @@ if makeQuiverOverlays
                 continue;
             end
 
-            R_mean = mean(RADIUS_OF_CURVATURE(fr, :), 'omitnan');
-            if isnan(R_mean), R_mean = 100; end
-
-            xq(k) = xc + R_mean * cos(theta_k);
-            yq(k) = yc + R_mean * sin(theta_k);
+            % Anchor arrow at the boundary point closest to theta_k.
+            [~, nearest_idx] = min(abs(wrapTo2Pi(theta_poly) - wrapTo2Pi(theta_k)));
+            xq(k) = poly(nearest_idx, 1);
+            yq(k) = poly(nearest_idx, 2);
 
             % Tangent vector (perpendicular to radial)
             tx_k = -sin(theta_k);
@@ -568,7 +607,7 @@ if makeSnapshotPlots
         xc = centroidXY(fr, 1);
         yc = centroidXY(fr, 2);
         vtheta = Vtheta_kymo(fr, :);
-        vtheta_raw = Vtheta_raw(fr, :);
+        vtheta_raw = Vtheta_raw{fr};
         radius_curv = RADIUS_OF_CURVATURE(fr, :);
         vort = Vorticity_kymo(fr, :);
 
@@ -581,13 +620,14 @@ if makeSnapshotPlots
         plot(xc, yc, 'r+', 'MarkerSize', 12, 'LineWidth', 2);
         title(sprintf('Frame %d (t=%.2f min)', fr, time_min(fr)));
 
-        % Panel 2: RAW tangential velocity (500 pts - key difference!)
+        % Panel 2: RAW tangential velocity (native boundary pts)
         subplot(3,3,2);
-        plot(1:nBoundary, vtheta_raw, 'b-', 'LineWidth', 1);
+        nPtsRaw = numel(vtheta_raw);
+        plot(1:nPtsRaw, vtheta_raw, 'b-', 'LineWidth', 1);
         hold on; yline(0, 'k--', 'LineWidth', 0.5);
         xlabel('Boundary Point'); ylabel('v_\theta (\mum/s)');
-        title('RAW Tangential (500 pts, analytical)');
-        grid on; xlim([1 nBoundary]); ylim(ylim_vtheta);
+        title(sprintf('RAW Tangential (%d pts)', nPtsRaw));
+        grid on; xlim([1 max(nPtsRaw,1)]); ylim(ylim_vtheta);
 
         % Panel 3: Binned tangential velocity
         subplot(3,3,3);
@@ -633,14 +673,14 @@ if makeSnapshotPlots
 
         % Panel 8: Raw vs Binned comparison
         subplot(3,3,8);
-        theta_raw_fr = Theta_raw(fr, :);
+        theta_raw_fr = Theta_raw{fr};
         scatter(theta_raw_fr, vtheta_raw, 10, 'b', 'filled', 'MarkerFaceAlpha', 0.5);
         hold on;
         plot(thetaCenters, vtheta, 'r-', 'LineWidth', 2);
         xlabel('\theta (rad)'); ylabel('v_\theta (\mum/s)');
         title('Raw (blue) vs Binned (red)');
         xlim([0, 2*pi]); ylim(ylim_vtheta);
-        legend({'Raw 500pt', 'Binned'}, 'Location', 'best');
+        legend({'Raw pts', 'Binned'}, 'Location', 'best');
 
         % Panel 9: Statistics
         subplot(3,3,9); axis off;
@@ -679,16 +719,17 @@ fprintf('All visualizations complete!\n\n');
 
 %% ========================== SAVE RESULTS ===================================
 save(fullfile(outDir,'tangential_linear_interp_results.mat'), ...
-     'Vtheta_raw', 'Theta_raw', ...  % NEW: raw 500-point data
+     'Vtheta_raw', 'Theta_raw', ...  % raw boundary-point data (cell arrays, variable length)
      'Vtheta_kymo', 'Npts_kymo', 'thetaCenters', 'thetaBinEdges', 'time_min', ...
      'centroidXY', 'areaMask', 'qcFlag', 'RADIUS_OF_CURVATURE', ...
      'Vorticity_kymo', 'Vorticity_field', 'MeanVorticity', ...
-     'px_per_um', 'dt_sec', 'normalOffsetPx', 'pivMatFile', 'base_dir');
+     'visPolySeq', ...
+     'px_per_um', 'dt_sec', 'normalOffsetPx', 'base_dir');
 
 fprintf('Saved outputs to: %s\n', outDir);
 fprintf('\nLINEAR INTERPOLANT APPROACH outputs:\n');
-fprintf('  - Vtheta_raw: Raw tangential velocity at 500 boundary points\n');
-fprintf('  - Theta_raw: Theta values for each boundary point\n');
+fprintf('  - Vtheta_raw: Raw tangential velocity at boundary points (cell array, native resolution)\n');
+fprintf('  - Theta_raw: Theta values for each boundary point (cell array)\n');
 fprintf('  - Vtheta_kymo: Binned tangential velocity (for compatibility)\n');
 fprintf('  - normalOffsetPx: %d pixels inward from boundary\n', normalOffsetPx);
 
@@ -698,15 +739,16 @@ fprintf('  - normalOffsetPx: %d pixels inward from boundary\n', normalOffsetPx);
 function [BW, stats, poly, RADIUS, xc, yc, tx, ty, theta_boundary] = ...
     make_oocyte_mask_with_tangents(I, sigmaBlur, threshFrac, se, polyOrder, ...
     nBoundary, theta, minAreaFrac, maxEccentric, minSolidity, centerHint)
-% Curvature-based boundary reconstruction WITH ANALYTICAL TANGENTS
+% Oocyte boundary segmentation using contour_retardance pipeline
+% + finite-difference tangent computation.
 %
-% This function extends make_oocyte_mask_curvature to also output:
-%   tx, ty - unit tangent vectors at each boundary point (analytical)
+% Uses segment_oocyte.m for mask detection. Tangent vectors are computed
+% from finite differences on the boundary polygon. Curvature is not
+% computed (RADIUS = NaN).
+%
+% Outputs:
+%   tx, ty - unit tangent vectors at each boundary point
 %   theta_boundary - theta values at each boundary point
-%
-% Tangents are computed analytically from the polar curve formula:
-%   dx/dtheta = r'*cos(theta) - r*sin(theta)
-%   dy/dtheta = r'*sin(theta) + r*cos(theta)
 
 [H, W] = size(I);
 
@@ -722,191 +764,38 @@ RADIUS = nan(1, numel(theta)-1);
 xc = centerHint(1); yc = centerHint(2);
 tx = []; ty = []; theta_boundary = [];
 
-% 1) Coarse threshold mask
-Iblur = imgaussfilt(I, sigmaBlur);
-BW0 = Iblur < (threshFrac * mean2(Iblur));
-BW0 = imdilate(BW0, se);
-BW0 = imfill(BW0, 'holes');
-BW0 = imerode(BW0, se);
+% --- Segmentation via contour_retardance pipeline ---
+segParams.sigmaBlur            = sigmaBlur;
+segParams.closeRadius          = 1;
+segParams.minArea              = 5000;
+segParams.thresholdMode        = 'adaptive';
+segParams.segFromMask          = true;
+segParams.adaptSensitivity     = 0.7;
+segParams.adaptNeighborhood    = 201;
+segParams.edgeMethod           = 'Sobel';
+segParams.edgeDilateRadius     = 2;
+segParams.gradientPercentile   = 70;
+segParams.useCaching           = false;  % caching handled by caller
 
-% Keep largest connected component
-labels = bwlabel(BW0);
-if max(labels(:)) == 0
-    return;
-end
-Area = zeros(1, max(labels(:)));
-for i = 1:max(labels(:))
-    temp = regionprops(labels == i, 'Area');
-    Area(i) = temp.Area;
-end
-mask = labels == find(Area == max(Area), 1);
-BW0 = mask;
-
-% 2) Edge pixels
-edges = imgradient(BW0);
-edges = edges > 0;
-
-xx = []; yy = [];
-for i = 1:size(I, 1)
-    for j = 1:size(I, 2)
-        if edges(i, j) == 1
-            xx = [xx j];
-            yy = [yy i];
-        end
-    end
-end
-
-if numel(xx) < 50
-    warning('Too few edge pixels for circfit; returning empty mask.');
+[BW, xc, yc, R_fit, bndPoly, ~] = segment_oocyte(I, segParams, []);
+if isempty(bndPoly)
+    BW = false(size(I));
     return;
 end
 
-% 3) Circle fit
-[~, xc, yc] = circfit(xx, yy);
+% Use boundary polygon directly from segment_oocyte (native resolution)
+poly = bndPoly;
 
-% 4) Polar coordinates
-nPts = numel(xx);
-r = zeros(1, nPts);
-angle = zeros(1, nPts);
+% Tangent vectors via finite differences on boundary polygon
+dx = gradient(poly(:,1));
+dy = gradient(poly(:,2));
+mag = sqrt(dx.^2 + dy.^2) + eps;
+tx = dx ./ mag;
+ty = dy ./ mag;
 
-for kk = 1:nPts
-    r(kk) = norm([xx(kk) - xc, yy(kk) - yc]);
-    if yy(kk) > yc
-        angle(kk) = acos(dot(([xx(kk) - xc, yy(kk) - yc]) / norm([xx(kk) - xc, yy(kk) - yc]), [1 0]));
-    else
-        angle(kk) = 2*pi - acos(dot(([xx(kk) - xc, yy(kk) - yc]) / norm([xx(kk) - xc, yy(kk) - yc]), [1 0]));
-    end
-end
-
-% 5) FIRST PASS: polynomial fit
-RRrow = nan(1, nBoundary);
-
-param = polyfit(angle, r, polyOrder);
-xgrid = linspace(0, 2*pi, nBoundary);
-y1 = polyval(param, xgrid);
-
-r_theta_p = polyder(param);
-r_2theta_p = polyder(r_theta_p);
-r_theta = polyval(r_theta_p, xgrid);
-r_2theta = polyval(r_2theta_p, xgrid);
-
-% Curvature for middle half
-for ii = (length(theta)-1)/2 - (length(theta)-1)/4 : (length(theta)-1)/2 + (length(theta)-1)/4
-    sel = xgrid > theta(ii) & xgrid < theta(ii+1);
-    if any(sel)
-        num = ((y1(sel).^2 + r_theta(sel).^2).^(3/2));
-        den = abs(y1(sel).^2 + 2*r_theta(sel).^2 - y1(sel).*r_2theta(sel));
-        RADIUS(ii) = mean(num ./ max(den, eps));
-    end
-end
-
-RRrow(126:375) = y1(126:375);
-
-% 6) SECOND PASS for wrap-around
-[angle2, Iord] = sort(angle);
-r2 = r(Iord);
-
-angle2 = angle2 + pi;
-angle2(angle2 > 2*pi) = angle2(angle2 > 2*pi) - 2*pi;
-
-param2 = polyfit(angle2, r2, polyOrder);
-x2 = linspace(0, 2*pi, nBoundary);
-y2 = polyval(param2, x2);
-
-r_theta_p2 = polyder(param2);
-r_2theta_p2 = polyder(r_theta_p2);
-r_theta2 = polyval(r_theta_p2, x2);
-r_2theta2 = polyval(r_2theta_p2, x2);
-
-x2 = x2 - pi;
-x2(x2 < 0) = 2*pi + x2(x2 < 0);
-
-y2 = circshift(y2, nBoundary/2);
-
-RRrow(1:125) = y2(1:125);
-RRrow(376:500) = y2(376:500);
-
-% Curvature for remaining quarters
-for ii = 1:(length(theta)-1)/2 - (length(theta)-1)/4
-    sel = x2 > theta(ii) & x2 < theta(ii+1);
-    if any(sel)
-        num = ((y2(sel).^2 + r_theta2(sel).^2).^(3/2));
-        den = abs(y2(sel).^2 + 2*r_theta2(sel).^2 - y2(sel).*r_2theta2(sel));
-        RADIUS(ii) = mean(num ./ max(den, eps));
-    end
-end
-
-for ii = (length(theta)-1)/2 + (length(theta)-1)/4 : length(theta)-1
-    sel = x2 > theta(ii) & x2 < theta(ii+1);
-    if any(sel)
-        num = ((y2(sel).^2 + r_theta2(sel).^2).^(3/2));
-        den = abs(y2(sel).^2 + 2*r_theta2(sel).^2 - y2(sel).*r_2theta2(sel));
-        RADIUS(ii) = mean(num ./ max(den, eps));
-    end
-end
-
-% 7) Reconstruct boundary
-theta_boundary = linspace(0, 2*pi, nBoundary);
-XX = RRrow .* cos(theta_boundary) + xc;
-YY = RRrow .* sin(theta_boundary) + yc;
-
-XX = min(max(XX, 1), W);
-YY = min(max(YY, 1), H);
-
-BW = poly2mask(XX, YY, H, W);
-BW = imfill(BW, 'holes');
-
-poly = [XX(:) YY(:)];
-
-% =========================================================================
-% NEW: COMPUTE ANALYTICAL TANGENTS
-% =========================================================================
-% For a polar curve r(theta), the tangent direction is:
-%   dx/dtheta = r'(theta)*cos(theta) - r(theta)*sin(theta)
-%   dy/dtheta = r'(theta)*sin(theta) + r(theta)*cos(theta)
-%
-% We need to use the appropriate polynomial for each region:
-%   - Middle region (indices 126:375): use param (first pass)
-%   - Edge regions (1:125, 376:500): use param2 (second pass)
-
-tx = zeros(nBoundary, 1);
-ty = zeros(nBoundary, 1);
-
-% Middle region: use first pass polynomial (param)
-middle_idx = 126:375;
-theta_mid = theta_boundary(middle_idx);
-r_mid = polyval(param, theta_mid);
-r_prime_mid = polyval(r_theta_p, theta_mid);
-
-dx_mid = r_prime_mid .* cos(theta_mid) - r_mid .* sin(theta_mid);
-dy_mid = r_prime_mid .* sin(theta_mid) + r_mid .* cos(theta_mid);
-mag_mid = sqrt(dx_mid.^2 + dy_mid.^2) + eps;
-tx(middle_idx) = dx_mid ./ mag_mid;
-ty(middle_idx) = dy_mid ./ mag_mid;
-
-% Edge regions: use second pass polynomial (param2)
-% Need to shift theta by pi for the second pass polynomial
-edge_idx = [1:125, 376:500];
-theta_edge = theta_boundary(edge_idx);
-
-% Shift theta for param2 evaluation (param2 was fit with angles shifted by pi)
-theta_edge_shifted = theta_edge + pi;
-theta_edge_shifted(theta_edge_shifted > 2*pi) = theta_edge_shifted(theta_edge_shifted > 2*pi) - 2*pi;
-
-r_edge = polyval(param2, theta_edge_shifted);
-r_prime_edge = polyval(r_theta_p2, theta_edge_shifted);
-
-% Compute tangent in the shifted coordinate system, then transform back
-% The tangent direction in original theta is still computed using original theta
-dx_edge = r_prime_edge .* cos(theta_edge) - r_edge .* sin(theta_edge);
-dy_edge = r_prime_edge .* sin(theta_edge) + r_edge .* cos(theta_edge);
-mag_edge = sqrt(dx_edge.^2 + dy_edge.^2) + eps;
-tx(edge_idx) = dx_edge ./ mag_edge;
-ty(edge_idx) = dy_edge ./ mag_edge;
-
-% =========================================================================
-% END ANALYTICAL TANGENTS
-% =========================================================================
+% Theta at each boundary point (relative to center)
+theta_boundary = atan2(poly(:,2) - yc, poly(:,1) - xc)';
+theta_boundary(theta_boundary < 0) = theta_boundary(theta_boundary < 0) + 2*pi;
 
 % QC
 st = regionprops(BW, 'Area', 'Eccentricity', 'Centroid', 'Solidity');
@@ -1199,6 +1088,33 @@ end
 
 function v = clamp(v, lo, hi)
 v = max(lo, min(hi, v));
+end
+
+
+function d = filter_image_dir(d)
+% Remove hidden files, macOS AppleDouble sidecars, subdirectories,
+% zero-byte stubs, and entries whose extensions imread cannot handle.
+% Keeps dir() struct shape.
+if isempty(d); return; end
+keep = true(numel(d), 1);
+validExt = {'.tif','.tiff','.png','.jpg','.jpeg','.bmp','.gif','.ome','.dcm','.nef','.cr2'};
+for i = 1:numel(d)
+    name = d(i).name;
+    if isempty(name) || name(1) == '.'                  % hidden / AppleDouble
+        keep(i) = false; continue;
+    end
+    if d(i).isdir                                       % subdirectory
+        keep(i) = false; continue;
+    end
+    if isfield(d, 'bytes') && d(i).bytes == 0           % zero-byte stub
+        keep(i) = false; continue;
+    end
+    [~,~,ext] = fileparts(name);
+    if ~any(strcmpi(ext, validExt))
+        keep(i) = false;
+    end
+end
+d = d(keep);
 end
 
 

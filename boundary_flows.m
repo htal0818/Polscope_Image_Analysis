@@ -38,8 +38,18 @@ if useFourStates
     d2 = dir(s2); d3 = dir(s3); d4 = dir(s4);
 end
 
-% --- PIVlab output .mat file ---
-pivMatFile = '/Users/hridaytalreja/Desktop/Jan_data_2026/jan_20_2026_FSW_and_eggs_50msexp_15sint_20x_50nmceiling/eggs/SMS_2026_0120_1518_1/Pos0/Jan21_2026_PIV/PIVlab_output.mat';
+% --- Drop hidden / macOS AppleDouble / non-image files from the listings ---
+% Fixes "Unable to determine the file format" from imread when a folder
+% contains e.g. .DS_Store or ._StateN_* sidecars, which dir() otherwise picks up.
+d1 = filter_image_dir(d1);
+if useFourStates
+    d2 = filter_image_dir(d2);
+    d3 = filter_image_dir(d3);
+    d4 = filter_image_dir(d4);
+end
+
+% --- PIVlab data: read from workspace (run PIVlab first) ---
+% Expects: u_original, v_original, x, y in workspace
 
 % --- Optional crop (match your workflows) ---
 doCrop = true;
@@ -120,9 +130,8 @@ makeSnapshotPlots = true;       % Create detailed snapshot visualizations
 snapshotFrames = [];            % Specific frames to visualize (empty = auto-select)
 snapshotEveryNFrames = 2;       % Save tangential flow analysis every N frames
 
-%% ========================== LOAD PIV DATA =================================
-S = load(pivMatFile);
-[Xc, Yc, Uc, Vc] = pickPIVFields(S);
+%% ========================== PIV DATA FROM WORKSPACE ======================
+Uc = u_original; Vc = v_original; Xc = x; Yc = y;
 
 nFramesPIV = numel(Uc);
 nFramesImg = numel(d1);
@@ -162,14 +171,31 @@ visImageSeq = cell(nFrames,1);    % Store normalized images (for overlays)
 for fr = 1:nFrames
 
     %% ----- Load PolScope intensity image used for boundary -----
-    a1 = double(imread(fullfile(d1(fr).folder, d1(fr).name)));
-    if useFourStates
-        a2 = double(imread(fullfile(d2(fr).folder, d2(fr).name)));
-        a3 = double(imread(fullfile(d3(fr).folder, d3(fr).name)));
-        a4 = double(imread(fullfile(d4(fr).folder, d4(fr).name)));
-        Iraw = a1 + a2 + a3 + a4;
-    else
-        Iraw = a1;
+    try
+        a1 = double(imread(fullfile(d1(fr).folder, d1(fr).name)));
+        if useFourStates
+            a2 = double(imread(fullfile(d2(fr).folder, d2(fr).name)));
+            a3 = double(imread(fullfile(d3(fr).folder, d3(fr).name)));
+            a4 = double(imread(fullfile(d4(fr).folder, d4(fr).name)));
+            Iraw = a1 + a2 + a3 + a4;
+        else
+            Iraw = a1;
+        end
+    catch ME
+        % Report which file broke and skip this frame cleanly.
+        badList = {fullfile(d1(fr).folder, d1(fr).name)};
+        if useFourStates
+            badList = [badList, ...
+                {fullfile(d2(fr).folder, d2(fr).name), ...
+                 fullfile(d3(fr).folder, d3(fr).name), ...
+                 fullfile(d4(fr).folder, d4(fr).name)}];
+        end
+        fprintf(2, 'Frame %d: imread failed (%s). Candidate files:\n', fr, ME.message);
+        for kk = 1:numel(badList)
+            fprintf(2, '    %s\n', badList{kk});
+        end
+        fprintf(2, '  -> skipping frame %d.\n', fr);
+        continue;
     end
 
     if doCrop
@@ -559,30 +585,12 @@ if makeQuiverOverlays
         BW_frame = poly2mask(poly(:,1), poly(:,2), H, W);
         BW_frame = imfill(BW_frame, 'holes');
 
-        xq = zeros(nQuiver, 1);
-        yq = zeros(nQuiver, 1);
-        uq = zeros(nQuiver, 1);
-        vq = zeros(nQuiver, 1);
-
-        % Get max velocity for normalization (makes arrows visible)
-        vmax_frame = max(abs(vtheta), [], 'omitnan');
-        if isnan(vmax_frame) || vmax_frame == 0
-            vmax_frame = 1;
-        end
-
-        % Arrow length in pixels (adjust quiverScale to change)
-        arrowLengthPx = 40 * quiverScale;
         per_frame = bwperim(BW_frame);
         D_frame = bwdist(per_frame);
 
         % Cortical band: pixels inside BW, between bandOuterPx and bandInnerPx from edge
         cortical_band = BW_frame & (D_frame >= bandOuterPx) & (D_frame <= bandInnerPx);
 
-            if isnan(vtheta_k), continue; end
-
-            % Position on boundary
-            R_mean = mean(RADIUS_OF_CURVATURE(fr, :), 'omitnan');
-            if isnan(R_mean), R_mean = 100; end
         % Create velocity image: assign velocity to each pixel based on its angle
         velocity_image = nan(H, W);
         [yy, xx] = find(cortical_band);
@@ -621,22 +629,7 @@ if makeQuiverOverlays
             velocity_rgb(:,:,c) = channel;
         end
 
-            % Scale arrow by velocity (normalized so max velocity = arrowLengthPx)
-            arrow_scale = arrowLengthPx * (vtheta_k / vmax_frame);
-
-            uq(k) = arrow_scale * tx;
-            vq(k) = arrow_scale * ty;
-        end
-
-        % Remove NaN entries
-        valid = ~isnan(uq) & ~isnan(vq);
-        xq = xq(valid); yq = yq(valid);
-        uq = uq(valid); vq = vq(valid);
-
-        % Plot quiver (no autoscale, we already scaled)
-        quiver(xq, yq, uq, vq, 0, 'Color', [0 1 0], 'LineWidth', 1.5, 'MaxHeadSize', 0.5);
-
-        title(sprintf('Frame %d: Tangential Flow Vectors (t=%.2f min)', fr, time_min(fr)), ...
+        title(sprintf('Frame %d: Tangential Flow Heatmap (t=%.2f min)', fr, time_min(fr)), ...
             'FontSize', 12, 'Color', 'w');
         % Overlay with transparency (only where cortical band exists)
         h_overlay = image(velocity_rgb);
@@ -950,7 +943,8 @@ save(fullfile(outDir,'tangential_kymo_results.mat'), ...
      'Vtheta_kymo','Npts_kymo','thetaCenters','thetaBinEdges','time_min', ...
      'centroidXY','areaMask','qcFlag','RADIUS_OF_CURVATURE', ...
      'Vorticity_kymo','Vorticity_field','MeanVorticity', ...
-     'px_per_um','dt_sec','bandOuterPx','bandInnerPx','pivMatFile','base_dir');
+     'visPolySeq', ...
+     'px_per_um','dt_sec','bandOuterPx','bandInnerPx','base_dir');
 
 fprintf('Saved outputs to: %s\n', outDir);
 fprintf('\nVorticity data included:\n');
@@ -963,25 +957,19 @@ fprintf('  - MeanVorticity: Global mean vorticity in cortical band (1/s)\n');
 function [BW, stats, poly, RADIUS, xc, yc] = make_oocyte_mask_curvature(I, ...
     sigmaBlur, threshFrac, se, polyOrder, nBoundary, theta, ...
     minAreaFrac, maxEccentric, minSolidity, centerHint)
-% Curvature-based oocyte boundary reconstruction (adapted from kymograph.m).
-% Methodology matches SCW_flows_curvature.m for strict physical encoding.
+% Oocyte boundary segmentation using contour_retardance pipeline.
 %
-% Steps:
-% 1) Coarse threshold mask (darker oocyte on brighter background)
-% 2) Edge detection on coarse mask
-% 3) Circle fit to get center (xc, yc) - optionally using centerHint
-% 4) Polar coordinate transformation r(theta) for edge points
-% 5) Polynomial fit of r(theta) with wrap-around handling (two passes)
-% 6) Curvature calculation from polar curve
-% 7) Reconstruct smooth boundary polygon
+% Uses segment_oocyte.m for mask detection (adaptive threshold + morphological
+% cleanup + bwboundaries). Curvature is not computed (RADIUS = NaN).
 %
-% centerHint (optional): [xc_prev, yc_prev] from previous frame for faster init
+% centerHint (optional): [xc_prev, yc_prev] from previous frame (unused now,
+% kept for signature compatibility)
 
 [H, W] = size(I);
 
 % Handle optional centerHint parameter
 if nargin < 11 || isempty(centerHint)
-    centerHint = [W/2, H/2];  % default: image center
+    centerHint = [W/2, H/2];
 end
 
 % Default outputs
@@ -989,148 +977,31 @@ BW = false(size(I));
 stats = [];
 poly = [];
 RADIUS = nan(1, numel(theta)-1);
-xc = centerHint(1); yc = centerHint(2);  % Use hint as initial guess
+xc = centerHint(1); yc = centerHint(2);
 
-% 1) Coarse threshold mask
-Iblur = imgaussfilt(I, sigmaBlur);
-BW0 = Iblur < (threshFrac * mean2(Iblur));
-BW0 = imdilate(BW0, se);
-BW0 = imfill(BW0, 'holes');
-BW0 = imerode(BW0, se);
+% --- Segmentation via contour_retardance pipeline ---
+segParams.sigmaBlur            = sigmaBlur;
+segParams.closeRadius          = 1;
+segParams.minArea              = 5000;
+segParams.thresholdMode        = 'adaptive';
+segParams.segFromMask          = true;
+segParams.adaptSensitivity     = 0.7;
+segParams.adaptNeighborhood    = 201;
+segParams.edgeMethod           = 'Sobel';
+segParams.edgeDilateRadius     = 2;
+segParams.gradientPercentile   = 70;
+segParams.useCaching           = false;  % caching handled by caller
 
-% Keep largest connected component
-labels = bwlabel(BW0);
-if max(labels(:)) == 0
-    return;  % no regions found
-end
-Area = zeros(1, max(labels(:)));
-for i = 1:max(labels(:))
-    temp = regionprops(labels == i, 'Area');
-    Area(i) = temp.Area;
-end
-mask = labels == find(Area == max(Area), 1);
-BW0 = mask;
-
-% 2) Edge pixels of coarse mask
-edges = imgradient(BW0);
-edges = edges > 0;
-
-% Extract edge pixel coordinates
-xx = []; yy = [];
-for i = 1:size(I, 1)
-    for j = 1:size(I, 2)
-        if edges(i, j) == 1
-            xx = [xx j];
-            yy = [yy i];
-        end
-    end
-end
-
-if numel(xx) < 50
-    warning('Too few edge pixels for circfit; returning empty mask.');
+[BW, xc, yc, R_fit, bndPoly, ~] = segment_oocyte(I, segParams, []);
+if isempty(bndPoly)
+    BW = false(size(I));
+    stats = [];
+    poly = [];
     return;
 end
 
-% 3) Circle fit to get center (uses circfit.m from codebase)
-[R, xc, yc] = circfit(xx, yy);
-
-% 4) Compute r and angle for each edge point (polar coordinates)
-nPts = numel(xx);
-r = zeros(1, nPts);
-angle = zeros(1, nPts);
-
-for kk = 1:nPts
-    r(kk) = norm([xx(kk) - xc, yy(kk) - yc]);
-
-    % Angle calculation matching kymograph.m methodology
-    if yy(kk) > yc
-        angle(kk) = acos(dot(([xx(kk) - xc, yy(kk) - yc]) / norm([xx(kk) - xc, yy(kk) - yc]), [1 0]));
-    else
-        angle(kk) = 2*pi - acos(dot(([xx(kk) - xc, yy(kk) - yc]) / norm([xx(kk) - xc, yy(kk) - yc]), [1 0]));
-    end
-end
-
-% 5) FIRST PASS: fit r(angle) and fill middle half of RR
-RRrow = nan(1, nBoundary);
-
-param = polyfit(angle, r, polyOrder);
-xgrid = linspace(0, 2*pi, nBoundary);
-y1 = polyval(param, xgrid);
-
-r_theta_p = polyder(param);
-r_2theta_p = polyder(r_theta_p);
-r_theta = polyval(r_theta_p, xgrid);
-r_2theta = polyval(r_2theta_p, xgrid);
-
-% Curvature calculation for middle half (bins 26-75 for 101 theta bins)
-for ii = (length(theta)-1)/2 - (length(theta)-1)/4 : (length(theta)-1)/2 + (length(theta)-1)/4
-    sel = xgrid > theta(ii) & xgrid < theta(ii+1);
-    if any(sel)
-        num = ((y1(sel).^2 + r_theta(sel).^2).^(3/2));
-        den = abs(y1(sel).^2 + 2*r_theta(sel).^2 - y1(sel).*r_2theta(sel));
-        RADIUS(ii) = mean(num ./ max(den, eps));
-    end
-end
-
-RRrow(126:375) = y1(126:375);
-
-% 6) SECOND PASS: sort and shift by pi to handle wrap-around
-[angle2, Iord] = sort(angle);
-r2 = r(Iord);
-
-angle2 = angle2 + pi;
-angle2(angle2 > 2*pi) = angle2(angle2 > 2*pi) - 2*pi;
-
-param2 = polyfit(angle2, r2, polyOrder);
-x2 = linspace(0, 2*pi, nBoundary);
-y2 = polyval(param2, x2);
-
-r_theta_p2 = polyder(param2);
-r_2theta_p2 = polyder(r_theta_p2);
-r_theta2 = polyval(r_theta_p2, x2);
-r_2theta2 = polyval(r_2theta_p2, x2);
-
-x2 = x2 - pi;
-x2(x2 < 0) = 2*pi + x2(x2 < 0);
-
-y2 = circshift(y2, nBoundary/2);
-
-RRrow(1:125) = y2(1:125);
-RRrow(376:500) = y2(376:500);
-
-% Curvature for remaining quarters
-for ii = 1:(length(theta)-1)/2 - (length(theta)-1)/4
-    sel = x2 > theta(ii) & x2 < theta(ii+1);
-    if any(sel)
-        num = ((y2(sel).^2 + r_theta2(sel).^2).^(3/2));
-        den = abs(y2(sel).^2 + 2*r_theta2(sel).^2 - y2(sel).*r_2theta2(sel));
-        RADIUS(ii) = mean(num ./ max(den, eps));
-    end
-end
-
-for ii = (length(theta)-1)/2 + (length(theta)-1)/4 : length(theta)-1
-    sel = x2 > theta(ii) & x2 < theta(ii+1);
-    if any(sel)
-        num = ((y2(sel).^2 + r_theta2(sel).^2).^(3/2));
-        den = abs(y2(sel).^2 + 2*r_theta2(sel).^2 - y2(sel).*r_2theta2(sel));
-        RADIUS(ii) = mean(num ./ max(den, eps));
-    end
-end
-
-% 7) Reconstruct final smooth boundary from RR
-xfinal = linspace(0, 2*pi, nBoundary);
-XX = RRrow .* cos(xfinal) + xc;
-YY = RRrow .* sin(xfinal) + yc;
-
-% Clamp to image bounds for poly2mask stability
-XX = min(max(XX, 1), W);
-YY = min(max(YY, 1), H);
-
-% Build final mask from reconstructed smooth boundary
-BW = poly2mask(XX, YY, H, W);
-BW = imfill(BW, 'holes');
-
-poly = [XX(:) YY(:)];
+% Use boundary polygon directly from segment_oocyte (native resolution)
+poly = bndPoly;
 
 % QC: check plausibility
 st = regionprops(BW, 'Area', 'Eccentricity', 'Centroid', 'Solidity');
@@ -1220,6 +1091,11 @@ theta_poly = wrapTo2Pi(theta_poly);
 [theta_sorted, sort_idx] = sort(theta_poly);
 xb_sorted = xb(sort_idx);
 yb_sorted = yb(sort_idx);
+
+% Remove duplicate angles (interp1 requires unique sample points)
+[theta_sorted, uniq_idx] = unique(theta_sorted, 'stable');
+xb_sorted = xb_sorted(uniq_idx);
+yb_sorted = yb_sorted(uniq_idx);
 
 % Handle wrap-around by extending data
 theta_extended = [theta_sorted - 2*pi; theta_sorted; theta_sorted + 2*pi];
@@ -1329,6 +1205,32 @@ switch lower(strtrim(pivVelUnit))
     otherwise
         error('Unknown pivVelUnit: %s', pivVelUnit);
 end
+end
+
+function d = filter_image_dir(d)
+% Remove hidden files, macOS AppleDouble sidecars, subdirectories,
+% zero-byte stubs, and entries whose extensions imread cannot handle.
+% Keeps dir() struct shape.
+if isempty(d); return; end
+keep = true(numel(d), 1);
+validExt = {'.tif','.tiff','.png','.jpg','.jpeg','.bmp','.gif','.ome','.dcm','.nef','.cr2'};
+for i = 1:numel(d)
+    name = d(i).name;
+    if isempty(name) || name(1) == '.'                  % hidden / AppleDouble
+        keep(i) = false; continue;
+    end
+    if d(i).isdir                                       % subdirectory
+        keep(i) = false; continue;
+    end
+    if isfield(d, 'bytes') && d(i).bytes == 0           % zero-byte stub
+        keep(i) = false; continue;
+    end
+    [~,~,ext] = fileparts(name);
+    if ~any(strcmpi(ext, validExt))
+        keep(i) = false;
+    end
+end
+d = d(keep);
 end
 
 function [Xc, Yc, Uc, Vc] = pickPIVFields(S)

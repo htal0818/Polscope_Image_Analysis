@@ -9,30 +9,31 @@ close all;
 
 
 
-% test this on frames where SCW is actively occuring 
+% test this on frames where SCW is actively occuring
 
-% find a maximum speed the flows hit 
+% find a maximum speed the flows hit
 
 % profile on
 
-state1_input = '/Users/hridaytalreja/Desktop/Jan_data_2026/2026_01_07_test_20x_FSW_and_alignment/SMS_2026_0107_1425_1/state1/';   
+state1_input = '/Users/hridaytalreja/Desktop/June_2026_data/2026_06_17_F11/SMS_2026_0617_1256_1/Pos0/*State1*';
 
 % --- Output root folder ---
-outDir = '/Users/hridaytalreja/Desktop/Jan_data_2026/2026_01_07_test_20x_FSW_and_alignment/SMS_2026_0107_1425_1/PIV_Jan13_2026/';
+outDir = '/Users/hridaytalreja/Desktop/June_2026_data/2026_06_17_F11/SMS_2026_0617_1256_1/Pos0/PIV_Jun18/';
 mkdir(outDir);
-% mkdir(outDir);
+OvlerayDir = '/Users/hridaytalreja/Desktop/June_2026_data/2026_06_17_F11/SMS_2026_0617_1256_1/Pos0/PIV_Jun18/Overlays/';
+mkdir(OvlerayDir);
 
 
 % % % %
 
 
-base_dir = '/Users/hridaytalreja/Desktop/Jan_data_2026/2026_01_07_test_20x_FSW_and_alignment/SMS_2026_0107_1425_1/Pos0/';
+base_dir = '/Users/hridaytalreja/Desktop/June_2026_data/2026_06_17_F11/SMS_2026_0617_1256_1/Pos0';
 
 
-s1 = strcat(base_dir,'/*State1*');
-s2 = strcat(base_dir,'/*State2*');
-s3 = strcat(base_dir,'/*State3*');
-s4 = strcat(base_dir,'/*State4*');
+s1 = strcat(base_dir,'/*State1*.tif');
+s2 = strcat(base_dir,'/*State2*.tif');
+s3 = strcat(base_dir,'/*State3*.tif');
+s4 = strcat(base_dir,'/*State4*.tif');
 
 d1 = dir(s1);
 d2 = dir(s2);
@@ -40,72 +41,91 @@ d3 = dir(s3);
 d4 = dir(s4);
 
 
-% % % 
+% % %
 
 
-px_per_um = 6.25/2;       % 6.25 px per µm (40x objective) or 3.12 for 20x
-dt        = 15;         % 30 s per frame
+px_per_um = 6.25/2;       % 6.25 px per um (40x objective) or 3.12 for 20x
+dt        = 20;         % 30 s per frame
 
-% --- Quiver appearance ---
-quiverAutoScale      = true;
-quiverAutoScaleFact  = 1.2;   % increase if arrows look small
-quiverColor          = [0.2 0.85 0.2];  % green
+% --- Overlay / quiver appearance (single source of truth) ---
+quiverColor   = [1 0 0];   % color of BOTH the flow arrows and the scale bar
+arrowScale    = 10;        % velocity -> length: plot-pixels per (pixel/frame) of displacement
+                           %   the ONE scale used for the arrows AND the bar
+                           %   (increase if arrows look small; the bar rescales with it)
+arrowStride   = 3;         % plot every Nth vector in x & y (higher = fewer arrows)
+arrowHeadSize = 1.9;         % flow-arrow head size (MaxHeadSize)
+
+% --- Velocity scale bar (reference arrow, upper-right corner) ---
+scaleBar_refVel_umin = 5; % speed the reference arrow represents (um/min) = the label
+scaleBar_backdrop    = true;
 
 % --- Save overlays ---
-makeVideo = true;     
+makeVideo = true;
 
 %% ================== PIVlab arrays from workspace =========================
 
 Uc = u_original; Vc = v_original; Xc = x; Yc = y;
 
 nFrames = numel(Uc);
+t_sec = (0:nFrames-1) * dt;  %  conversion to s
+t_min = t_sec/60; %conversion to min
 
 % grid spacing (pixels) for divergence after unit conversion
 dx_px = median(diff(unique(Xc{1}(:))));
 dy_px = median(diff(unique(Yc{1}(:))));
 
 
+%% =================== Segmentation params (contour_retardance pipeline) ===
+segParams.sigmaBlur            = 1;       % Gaussian blur sigma (px)
+segParams.closeRadius          = 25;      % morphological close disk radius (px) — matches contour_retardance.m
+segParams.minArea              = 5000;    % min object area (px^2)
+segParams.thresholdMode        = 'otsu';  % 'adaptive', 'edge', or 'gradient'
+segParams.segFromMask          = true;    % true for 4-state (oocyte is dark)
+segParams.adaptSensitivity     = 1;
+segParams.adaptNeighborhood    = 201;
+segParams.edgeMethod           = 'Sobel';
+segParams.edgeDilateRadius     = 2;
+segParams.gradientPercentile   = 80;
+segParams.useCaching           = false;
+segParams.cacheIntensityThreshold = 0.02;
+segParams.cacheForceRecalcEveryN  = 10;
 
+% --- Boundary smoothing / curvature diagnostics ---
+% AC is useful when the thresholded edge is close but jagged; turn off if it
+% drifts onto internal texture for a given oocyte/movie.
+segParams.useActiveContour       = false;
+segParams.activeContourIterations = 100;
+segParams.activeContourMethod    = 'Chan-Vese';
+segParams.smoothMask             = false;   % match contour.m: keep the raw Otsu mask (no rebuild from smoothed boundary)
+segParams.smoothBoundary         = true;    % smooth only the RETURNED polygon (curvature/geom), not the mask
+segParams.nBoundaryPts           = 720;
+segParams.boundarySmoothFrac     = 0.05;
+segParams.forceOuterEnvelope     = false;   % match contour.m: no outer-envelope rebuild; cleanup is imclose+imfill
+segParams.outerEnvelopePercentile = 95;
 
-
-%% =================== Active contour params / reuse / early stop ==========
-sigmaBlur       = 3.0;     % pre-blur for stability
-minAreaPx       = 200;     % min component size (pixels)
-fudgeFactor     = 0.5;     % Sobel threshold scale
-se_len          = 3;       % dilation line length
-smooth_iters    = 2;       % diamond erosions at the end
-
-acItersMax      = 300;     % max iterations cap
-acChunk         = 50;      % iterate in chunks (check convergence)
-acSmooth        = 2;       % smoothing 
-acContraction   = 0.25;       % >0 inward bias, <0 outward, 0 neutral
-
-growPx          = 0;       % dilate previous mask for growth
-shiftWithCentroid = true;  % translate prev mask toward current seed
-
-iouStop         = 0.995;   % early stop if IoU ≥ this
-fracChangeStop  = 1e-4;    % or fractional pixel change ≤ this
-
-annulusMin      = 0.15;    % ROI inner radius (fraction of min(H,W))
-annulusMax      = 0.65;    % ROI outer radius (fraction of min(H,W))
-
-% se90 = strel('line', se_len, 90);
-% se0  = strel('line', se_len, 0);
-se  = strel('diamond', 5);
+segCache = [];
+maskErodePx = 1;   % erode mask by N px before PIV masking (exclude edge vectors)
 
 %% =================== Containers =========================================
 BW_seq     = cell(nFrames,1);
 polySeq    = cell(nFrames,1);
+geomSeq    = cell(nFrames,1);
 INgridSeq  = cell(nFrames,1);
 U_masked   = cell(nFrames,1);
 V_masked   = cell(nFrames,1);
 
-prevBW = []; prevC = [];
+nBoundaryPts = segParams.nBoundaryPts;
+xc_px = nan(nFrames,1);
+yc_px = nan(nFrames,1);
+R_fit_px = nan(nFrames,1);
+curvatureByArc_umInv = nan(nFrames, nBoundaryPts);
+radiusCurvatureByArc_um = nan(nFrames, nBoundaryPts);
+thetaByArc_deg = nan(nFrames, nBoundaryPts);
+meanRadiusCurvature_um = nan(nFrames,1);
+medianRadiusCurvature_um = nan(nFrames,1);
 
 %% =================== MAIN LOOP: build mask (State-1) + map to PIV =======
-for t = 150:nFrames
-% for t = 75:77
-
+for t = 1:nFrames
 
 
     maskFile = fullfile(outDir, sprintf('mask_%04d.png', t));
@@ -113,186 +133,55 @@ for t = 150:nFrames
     plotFile = fullfile(outDir, 'velocity_vs_time.png');
     csvFile  = fullfile(outDir, 'flow_metrics.csv');
 
- 
-
-
     a1  = im2double(imread(fullfile(d1(t).folder, d1(t).name)));
-
-
     a2 = im2double(imread(fullfile(d2(t).folder, d2(t).name)));
     a3 = im2double(imread(fullfile(d3(t).folder, d3(t).name)));
     a4 = im2double(imread(fullfile(d4(t).folder, d4(t).name)));
 
-    xmin = 5;
-    ymin = 5;
-    width = 10;
-    height = 10;
+    I = (a1+a2+a3+a4)/4;
 
+    % change ROI depending on oocyte posn.
+    % I = imcrop(I,[5 5 1900 1900]);
+    S = I;  % keep a copy for overlay display
 
-    I= (a1+a2+a3+a4)/1;
-    % a = im2gray(a);
-
-    % change ROI depdending on oocyte posn.
-    I=imcrop(I,[5 5 1900 1900]);
-  
-
-    % --- 1) Blur ---
-    I = imgaussfilt(I, sigmaBlur);
-
-    % --- 2) Gradient magnitude & threshold ---
-
-    mask = I<.85*mean2(I);
-    mask = imdilate(mask,se);
-    mask=imfill(mask,'holes');
-    edges = imgradient(mask);
-    % gThr      = prctile(Gmag(:), 85);
-    edges=edges>0;
-
-    % Clean up init (keep strong rim)
-    % BW_init = imfill(BW_grad, 'holes');
-    % BW_init = bwareaopen(BW_init, 50);
-    % if any(BW_init(:)), BW_init = bwareafilt(BW_init, 1); end
-
-    % Smooth/close, then dilate
-
-    % BW_init = imclose(BW_init, strel('disk', 3, 0));
-
-    BW_init = edges;
-    % --- centroid from current seed (or center fallback) ---
-    if any(BW_init(:))
-        Sreg = regionprops(BW_init, 'Area','Centroid');
-        [~,imax] = max([Sreg.Area]);
-        Cseed = Sreg(imax).Centroid;   % [x y]
-    else
-        Cseed = [size(I,2) size(I,1)]/2;  % [x y]
-    end
-
-    % --- ROI annulus to keep AC near the oocyte ---
-    [H,W] = size(I);
-    if ~isempty(prevC), C = prevC; else, C = Cseed; end
-    cx = C(1); cy = C(2);
-    [Xg,Yg] = meshgrid(1:W,1:H);
-    r = sqrt((Xg-cx).^2 + (Yg-cy).^2);
-    rmin = annulusMin*min(H,W);  rmax = annulusMax*min(H,W);
-    ROI  = (r >= rmin) & (r <= rmax);
-
-    % --- reuse previous frame's mask as seed ---
-    BW_seed = BW_init;
-    if ~isempty(prevBW)
-        BW_prev = prevBW;
-        if shiftWithCentroid && ~isempty(prevC)
-            dxy = round(Cseed - prevC);  % [dx dy]
-            if any(dxy~=0)
-                try
-                    BW_prev = imtranslate(BW_prev, dxy, 'FillValues', 0, 'OutputView', 'same');
-                catch
-                    % older MATLAB: ignore shift if not supported
-                end
-            end
-        end
-        BW_prev = imdilate(BW_prev, strel('disk', growPx));  % allow modest growth
-        BW_seed = (BW_seed | (BW_prev & ROI));                % fuse & bind to ROI
-    end
-    if ~any(BW_seed(:))
-        BW_seed(round(H/2), round(W/2)) = true;
-        BW_seed = imdilate(BW_seed, strel('disk', 5));
-    end
-
-
-
-    BW_ac0  = BW_init;
-
-    BW_ac0 = imdilate(BW_init, strel('disk', 2, 0));
-
-
-    % --- 3) Active contour refinement ---
-
-    % --- finalize mask; keep largest component; remember for next frame ---
-    BW_ac = bwareafilt(BW_ac0, 1);
-    BW_ac = imfill(BW_ac, 'holes');
-    BW_ac = imopen(BW_ac, strel('disk', 2, 0));
-
-    if any(BW_ac(:))
-        Sreg = regionprops(BW_ac, 'Area','Centroid');
-        [~,imax] = max([Sreg.Area]);
-        BW_final = BW_ac;   % already single blob
-        C_final  = Sreg(imax).Centroid;
-        prevBW   = BW_final;   % <— reuse next frame
-        prevC    = C_final;    % <— reuse next frame
-    else
-        if ~isempty(prevBW)
-            BW_final = prevBW;   % fallback to last good
-        else
-            BW_final = false(size(I));
-        end
-    end
-
-    I_for_ac = imgaussfilt(I, sigmaBlur);
-    I_for_ac = I_for_ac.*ROI + (~ROI).*median(I_for_ac(:));
-
-    BW_ac = BW_seed;
-    BW_prev_iter = BW_ac;
-    nChunks = ceil(acItersMax / acChunk);
-
-    for c = 1:nChunks
-        try
-            BW_ac = activecontour(I_for_ac, BW_ac, acChunk, 'edge', ...
-                'SmoothFactor', acSmooth, 'ContractionBias', acContraction);
-        catch
-            BW_ac = activecontour(I_for_ac, BW_ac, acChunk, 'edge');
-        end
-        BW_ac = BW_ac & ROI;
-        BW_ac = imfill(BW_ac,'holes');
-        BW_ac = imopen(BW_ac, strel('disk',1));
-
-        inter = nnz(BW_ac & BW_prev_iter);
-        uni   = nnz(BW_ac | BW_prev_iter);
-        iou   = inter / max(1, uni);
-        fracChange = nnz(xor(BW_ac, BW_prev_iter)) / numel(BW_ac);
-
-        if (iou >= iouStop) || (fracChange <= fracChangeStop)
-            break  % early convergence
-        end
-        BW_prev_iter = BW_ac;
-    end
-
-
-
-    % Final clean-up
-    BW_final = bwareafilt(BW_ac, 1);
-    BW_final = imfill(BW_final, 'holes');
-    BW_final = imopen(BW_final, strel('disk', 2, 0));
+    % --- Segmentation via contour_retardance pipeline (segment_oocyte) ---
+    [BW_final, xc, yc, R_fit, poly, segCache, geom] = segment_oocyte(I, segParams, segCache);
+    if isempty(poly); continue; end
 
     % Save mask
     BW_seq{t} = BW_final;
-    imwrite(uint8(BW_final)*255, fullfile(outDir, sprintf('mask_%04d.png', t)));
-    % imshow(BW_final)
-    
-  
-
-
-    
-
-
-    % Polygon for mapping/outline
-    B = bwboundaries(BW_final);
-    if ~isempty(B)
-        [~,ii] = max(cellfun(@(p) size(p,1), B));
-        b   = B{ii}; step = max(1, floor(size(b,1)/400));
-        bds = b(1:step:end, :);
-        poly = [bds(:,2), bds(:,1)];
-    else
-        poly = [];
-    end
+    % if mod(t,10)==0 && makeVideo
+    %     imwrite(uint8(BW_final)*255, fullfile(outDir, sprintf('mask_%04d.png', t)));
+    % end
     polySeq{t} = poly;
+    geomSeq{t} = geom;
+    xc_px(t) = xc;
+    yc_px(t) = yc;
+    R_fit_px(t) = R_fit;
+
+    if isfield(geom, 'curvature_pxInv') && numel(geom.curvature_pxInv) == nBoundaryPts
+        curvatureByArc_umInv(t,:) = geom.curvature_pxInv(:)' * px_per_um;
+        radiusCurvatureByArc_um(t,:) = geom.radiusCurvature_px(:)' / px_per_um;
+        thetaByArc_deg(t,:) = rad2deg(geom.theta_rad(:)');
+        meanRadiusCurvature_um(t) = geom.meanRadiusCurvature_px / px_per_um;
+        medianRadiusCurvature_um(t) = geom.medianRadiusCurvature_px / px_per_um;
+    end
 
     % ---------- Map entire contour area to PIV nodes ----------
+    % ---------- Map entire contour area to PIV nodes ----------
     X = Xc{t}; Y = Yc{t};
-    if ~isempty(poly)
-        if ~isequal(poly(1,:), poly(end,:)), poly(end+1,:) = poly(1,:); end
-        INgrid = reshape(inpolygon(X(:), Y(:), poly(:,1), poly(:,2)), size(X));
+
+    % Erode mask so PIV nodes near the edge are excluded
+    BW_eroded = imerode(BW_final, strel('disk', maskErodePx));
+    B_eroded  = bwboundaries(BW_eroded);
+    if ~isempty(B_eroded)
+        [~, iLong] = max(cellfun(@(p) size(p,1), B_eroded));
+        bE = B_eroded{iLong};
+        polyMask = [bE(:,2), bE(:,1)];   % [x, y]
+        if ~isequal(polyMask(1,:), polyMask(end,:)), polyMask(end+1,:) = polyMask(1,:); end
+        INgrid = reshape(inpolygon(X(:), Y(:), polyMask(:,1), polyMask(:,2)), size(X));
     else
-        INgrid = false(size(X));   % blank if we couldn’t get a polygon
+        INgrid = false(size(X));
     end
     INgridSeq{t} = INgrid;
 
@@ -300,63 +189,68 @@ for t = 150:nFrames
     Ut(~INgrid) = NaN;  Vt(~INgrid) = NaN;
     U_masked{t} = Ut;   V_masked{t} = Vt;
 
-    % --- QUIVER + MASK OVERLAY (aligned) ---
+        % --- RAW IMAGE + PIV QUIVER OVERLAY (clean: no axes / title / text) ---
     [H,W] = size(S);
-    xMin = min(X(:)); xMax = max(X(:));
-    yMin = min(Y(:)); yMax = max(Y(:));
 
-    
-    
-    if mod(t,10)==0
-        figure('Name',sprintf('Overlay Frame %d',t),'Color','w'); 
-        imagesc([xMin xMax],[yMin yMax], S); axis image; colormap gray;
-        set(gca,'YDir','reverse'); hold on;
-    end
-
-    % mask outline (converted to X,Y axes)
-    Bmask = bwboundaries(BW_final);
-    if ~isempty(Bmask)
-        [~,ii] = max(cellfun(@(p) size(p,1), Bmask));
-        b = Bmask{ii};
-        sx = (xMax - xMin) / max(1,(W-1));
-        sy = (yMax - yMin) / max(1,(H-1));
-        bx = xMin + (b(:,2)-1)*sx;   % col -> x
-        by = yMin + (b(:,1)-1)*sy;   % row -> y
-        plot(bx, by, 'y-', 'LineWidth', 1.4);
-    end
-
-    % quiver (guard against empty idx)
+    % quiver node selection (guard against empty idx)
     idx = INgrid & ~isnan(Ut) & ~isnan(Vt);
     if ~any(idx(:))
         warning('Frame %d: no masked vectors to plot; showing all as fallback.', t);
         idx = ~isnan(Ut) & ~isnan(Vt);
     end
 
-    if exist('quiverAutoScaleFact','var') && ~isempty(quiverAutoScaleFact)
-        quiver(X(idx), Y(idx), Ut(idx), Vt(idx), ...
-            'AutoScale','on','AutoScaleFactor', quiverAutoScaleFact, ...
-            'Color', quiverColor, 'LineWidth', 1.2, 'MaxHeadSize', 1.1);
-    else
-        quiver(X(idx), Y(idx), Ut(idx), Vt(idx), 0, ...
-            'Color', quiverColor, 'LineWidth', 1.2, 'MaxHeadSize', 1.1);
-    end
+    % reduce arrow density: keep every arrowStride-th node in each direction
+    keep = false(size(idx));
+    keep(1:arrowStride:end, 1:arrowStride:end) = true;
+    idx = idx & keep;
 
-    text(xMin+10, yMin+20, sprintf('Frame %d', t), ...
-        'Color','w','FontSize',14,'FontWeight','bold');
-
-    title(sprintf('Quiver + Active Contour Mask — Frame %d', t));
+    % ---- ONE scale shared by the flow arrows AND the reference bar ----
+    % a real flow arrow of scaleBar_refVel_umin will be exactly refLen long
+    refVel_px = (scaleBar_refVel_umin/60) * dt * px_per_um;   % um/min -> px/frame
+    refLen    = arrowScale * refVel_px;                        % bar length (px)
 
     if mod(t,10)==0
-        exportgraphics(gca, fullfile(outDir, sprintf('PIV_and_AC_%04d.png', t)), 'Resolution', 150);
-        drawnow;
+        figure('Name',sprintf('Overlay Frame %d',t), 'Color', 'w', 'Visible', 'off',...
+            'Units','pixels','Position',[100 100 W H]);
+        imagesc(S); 
+        colormap gray;
+        axis image; 
+        axis off;
+        % set(gca,'YDir','reverse'); 
+        hold on;
+
+        % flow vectors -- MANUAL scale (NOT autoscale) so they match the bar
+        quiver(X(idx), Y(idx), arrowScale*Ut(idx), arrowScale*Vt(idx), 0, ...
+            'Color', quiverColor, 'LineWidth', 2, 'MaxHeadSize', arrowHeadSize);
+
+        % scale bar, anchored to the image's top-right corner
+        xl = xlim;  yl = ylim;
+        x2   = xl(2) - 0.15*diff(xl);
+        x1   = x2 - refLen;
+        yref = yl(1) + 0.07*diff(yl);
+
+        if scaleBar_backdrop
+            pX = 0.015*diff(xl);  pYt = 0.04*diff(yl);  pYb = 0.075*diff(yl);
+            % patch([x1-pX, x2+pX, x2+pX, x1-pX], ...
+            %       [yref-pYt, yref-pYt, yref+pYb, yref+pYb], ...
+            %       'k', 'FaceAlpha',0.35, 'EdgeColor','none');
+        end
+
+        quiver(x1, yref, refLen, 0, 0, ...
+            'Color', quiverColor, 'LineWidth', 2.5, 'MaxHeadSize', arrowHeadSize);
+        text((x1+x2)/2, yref+0.03*diff(yl), sprintf('%.3g \\mum/min', scaleBar_refVel_umin), ...
+            'Color', quiverColor, 'FontSize', 14, 'FontWeight','bold', ...
+            'HorizontalAlignment','center', 'VerticalAlignment','top');
+
+        exportgraphics(gca, fullfile(OvlerayDir, sprintf('PIV_and_AC_%04d.tif', t)));
+        close(gcf);
     end
-    
 
 
 end
 
-%% =================== Unit conversion to µm/s =============================
-um_per_px = 1/px_per_um;    % 0.16 µm/px
+%% =================== Unit conversion to um/s =============================
+um_per_px = 1/px_per_um;    % 0.16 um/px
 for t = 1:nFrames
     U_masked{t} = U_masked{t} * um_per_px / dt;
     V_masked{t} = V_masked{t} * um_per_px / dt;
@@ -388,31 +282,39 @@ for t = 1:nFrames
     divMed(t) = median(dvals,'omitnan');
 end
 
-t_min = (0:nFrames-1)*0.25;  % 15 s = 0.25 min
+
 
 % Plots
-figure('Color','w','Name','Mean Flow Speed <V(t)> ');
-plot(t_min, vel_mean,'--','LineWidth',1.4); hold on;
-xlabel('Time (min)'); ylabel('Mean Speed (µm/s)'); legend('Mean','Location','best'); grid on;
+figure('Color','k','Name','Mean Flow Speed <V(t)> ');
+plot(t_min, vel_mean,'r','LineWidth',1.4); hold on;
+xlabel('Time (min)'); ylabel('Mean Speed (um/s)'); legend('Mean','Location','best'); grid on;
+title("Mean flow speed over time");
 exportgraphics(gca, fullfile(outDir,'velocity_vs_time.png'), 'Resolution', 150);
 
-figure('Color','w','Name','Divergence of V(t))');
-plot(t_min, divMed,'--','LineWidth',1.4); ylabel('Mean div (s^{-1})');
+figure('Color','k','Name','Divergence of V(t))');
+plot(t_min, divMed,'b','LineWidth',1.4); ylabel('Mean div (s^{-1})');
 xlabel('Time (min)'); grid on;
 ylabel('Divergence (s^-1)');
+title("Divergence over time");
 exportgraphics(gca, fullfile(outDir,'divergence_vs_time.png'), 'Resolution', 150);
 
 % Save CSV of metrics
+R_fit_um = R_fit_px / px_per_um;
 T = table(t_min(:), vel_mean(:), vel_median(:), vel95(:), divRMS(:), divMed(:), ...
-    'VariableNames', {'time_min','vel_mean_um_s','vel_median_um_s','vel95_um_s','divRMS_s_inv','divMed_s_inv'});
+    R_fit_um(:), meanRadiusCurvature_um(:), medianRadiusCurvature_um(:), ...
+    'VariableNames', {'time_min','vel_mean_um_s','vel_median_um_s','vel95_um_s', ...
+    'divRMS_s_inv','divMed_s_inv','R_fit_um','mean_radius_curvature_um','median_radius_curvature_um'});
 writetable(T, fullfile(outDir, 'flow_metrics.csv'));
 
 
 % Save MAT with masks, polygons, and masked fields
 save(fullfile(outDir,'results_activecontour.mat'), ...
-'BW_seq','polySeq','INgridSeq','U_masked','V_masked', ...
-'vel_mean','vel_median','vel95','divRMS','divMed','t_min', ...
-'px_per_um','dt','dx_um','dy_um','-v7.3');
+    'BW_seq','polySeq','geomSeq','INgridSeq','U_masked','V_masked', ...
+    'vel_mean','vel_median','vel95','divRMS','divMed','t_min', ...
+    'xc_px','yc_px','R_fit_px','R_fit_um', ...
+    'curvatureByArc_umInv','radiusCurvatureByArc_um','thetaByArc_deg', ...
+    'meanRadiusCurvature_um','medianRadiusCurvature_um', ...
+    'px_per_um','dt','dx_um','dy_um','segParams','-v7.3');
 
 fprintf('Done. Outputs saved under: %s\n', outDir);
 
@@ -424,11 +326,9 @@ fprintf('Done. Outputs saved under: %s\n', outDir);
 % should be zero
 
 
-% vary box size and recheck all calibrations 
+% vary box size and recheck all calibrations
 
 
 
 % sanity checks: make sure wave speed of 45 um / min is reached. wave time
 % is 8 mins and distance traveled is pi * R with R being approx ~ 200 um
-
-
