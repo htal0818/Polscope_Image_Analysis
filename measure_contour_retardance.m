@@ -158,6 +158,11 @@ function result = measure_contour_retardance(Iraw, opts)
     end
 
     %% Extract boundary contour
+    if ~any(BW(:))
+        result = make_empty_result(Iret, BW, gradMask, edgeMask, boundarySupport);
+        result.ridgeResponse = ridgeResponse;
+        return;
+    end
     B = bwboundaries(BW);
     if isempty(B)
         result = make_empty_result(Iret, BW, gradMask, edgeMask, boundarySupport);
