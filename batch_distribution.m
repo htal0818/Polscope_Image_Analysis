@@ -4,18 +4,12 @@
 % This script:
 %   1. Scans a parent directory for all subfolders containing 'SM' in the name
 %   2. Inside each SM folder, looks for a 'Pos0' subfolder
-%   3. Loads image(s) from Pos0 based on inputMode:
-%        'retardance'  — loads a single pre-computed retardance image
-%        'four_state'  — loads State1..State4 images, averages them for
-%                        segmentation, and loads a separate retardance image
-%                        for measurement
-%   4. Calls measure_contour_retardance() to detect the oocyte boundary
-%      and sample retardance (nm) along the cortical contour
+%   3. Loads the retardance image from Pos0
+%   4. Calls measure_contour_retardance() to segment the oocyte (LoG ridge
+%      detection + active contour) and sample retardance (nm) along the
+%      cortical contour
 %   5. Pools contour retardance values across all oocytes and produces
 %      a histogram of retardance (nm) vs counts
-%
-% Uses the same segmentation + contour measurement pipeline as
-% contour_retardance.m via the shared function measure_contour_retardance().
 %
 % Expected folder structure:
 %   parent_dir/
@@ -35,49 +29,22 @@ clear all; close all; clc
 % --- Parent directory containing all SM subfolders ---
 parent_dir = '/path/to/your/data/';
 
-% --- Input mode ---
-% 'retardance'  : pre-computed retardance images (default, current behavior)
-% 'four_state'  : raw 4-state Polscope data — State1..State4 summed/averaged
-%                 for segmentation, separate retardance image for measurement
-inputMode = 'four_state';
-
 % --- File pattern for retardance images inside Pos0 ---
 retardance_pattern = '*Retardance*';
-
-% --- File patterns for four_state mode ---
-state_patterns = {'*State1*', '*State2*', '*State3*', '*State4*'};
 
 % --- Options passed to measure_contour_retardance() ---
 % (see measure_contour_retardance.m for full list and defaults)
 opts = struct();
-opts.retardance_ceiling_nm = 50;    % Polscope retardance ceiling (nm)
-opts.bit_depth             = 16;    % image bit depth (16-bit = 0..65535)
-opts.sigmaBlur             = 1;    % Gaussian blur sigma (px) for segmentation
-opts.closeRadius           = 25;    % morphological close disk radius (px)
-opts.minArea               = 5000;  % minimum object area (px^2) to reject debris
-opts.thresholdMode         = 'adaptive';
-opts.fixedThreshold        = 500;
-opts.percentileThreshold   = 30;
-opts.adaptiveSensitivity   = 0.35; % for 'adaptive' mode (0-1, higher = more foreground)
-
-% --- Optional gradient/edge support and active-contour refinement ---
-% These operate on the segmentation image only; retardance measurements still
-% use Iraw converted to nm inside measure_contour_retardance().
-opts.useGradientThreshold     = true;
-opts.gradSigma                = 1;
-opts.gradPercentile           = 90;
-opts.useEdgeThreshold         = true;
-opts.edgeMethod               = 'canny';     % 'canny' or 'sobel'
-opts.cannyThresholds          = [0.25 0.4];
-opts.edgeDilateRadius         = 1;
-opts.useBoundarySupportMask   = true;
-opts.boundaryCloseRadius      = 20;
-opts.boundaryDilateRadius     = 1;
-opts.useActiveContour         = true;
-opts.activeContourIterations  = 150;
-opts.activeContourMethod      = 'edge';
-opts.activeSmoothFactor       = 1.0;
-opts.activeContractionBias    = 0.0;
+opts.retardance_ceiling_nm   = 50;    % Polscope retardance ceiling (nm)
+opts.bit_depth               = 16;    % image bit depth (16-bit = 0..65535)
+opts.smoothSigma             = 1.8;   % Gaussian blur sigma for segmentation
+opts.ridgeSigma              = 2.0;   % LoG kernel sigma for ridge detection
+opts.closeRadius             = 12;    % morphological close disk radius for seed
+opts.seedDilateRadius        = 3;     % dilate seed before active contour
+opts.minArea                 = 5000;  % minimum object area (px^2) to reject debris
+opts.activeContourIterations = 200;   % active contour iterations
+opts.activeContourSmoothness = 1.5;   % active contour smooth factor
+opts.edgeContractionBias     = 0.0;   % active contour contraction bias
 
 % --- Spatial calibration ---
 px_per_um = 6.25/2;             % pixels per micron (adjust for your objective)
@@ -158,73 +125,20 @@ for si = 1:numel(smDirs)
         continue;
     end
 
-    % Load image(s) based on input mode
-    imgLabel = '';
-    switch inputMode
-        case 'retardance'
-            opts.Iseg = [];
-
-            % Find retardance image(s) in Pos0
-            d = dir(fullfile(pos0Dir, retardance_pattern));
-            d = d(~[d.isdir]);  % exclude directories
-            if isempty(d)
-                fprintf('  [SKIP] %s/Pos0 — no retardance images matching "%s"\n', ...
-                    smName, retardance_pattern);
-                nSkipped = nSkipped + 1;
-                continue;
-            end
-            [~, sortIdx] = sort({d.name});
-            d = d(sortIdx);
-            imgPath = fullfile(d(1).folder, d(1).name);
-            Iraw = double(imread(imgPath));
-            imgLabel = d(1).name;
-
-        case 'four_state'
-            % Find State1..State4 images, sum and average for segmentation
-            stateFiles = cell(1, 4);
-            stateMissing = false;
-            for qi = 1:4
-                ds = dir(fullfile(pos0Dir, state_patterns{qi}));
-                ds = ds(~[ds.isdir]);  % exclude directories
-                if isempty(ds)
-                    fprintf('  [SKIP] %s/Pos0 — no images matching "%s"\n', ...
-                        smName, state_patterns{qi});
-                    stateMissing = true;
-                    break;
-                end
-                [~, idx] = sort({ds.name});
-                ds = ds(idx);
-                stateFiles{qi} = fullfile(ds(1).folder, ds(1).name);
-            end
-            if stateMissing
-                nSkipped = nSkipped + 1;
-                continue;
-            end
-            Isum = (double(imread(stateFiles{1})) ...
-                  + double(imread(stateFiles{2})) ...
-                  + double(imread(stateFiles{3})) ...
-                  + double(imread(stateFiles{4}))) / 4;
-            opts.Iseg = Isum;
-            opts.thresholdMode = 'adaptive';
-
-            % Also load the retardance image for measurement
-            d = dir(fullfile(pos0Dir, retardance_pattern));
-            d = d(~[d.isdir]);  % exclude directories
-            if isempty(d)
-                fprintf('  [SKIP] %s/Pos0 — no retardance images matching "%s"\n', ...
-                    smName, retardance_pattern);
-                nSkipped = nSkipped + 1;
-                continue;
-            end
-            [~, sortIdx] = sort({d.name});
-            d = d(sortIdx);
-            Iraw = double(imread(fullfile(d(1).folder, d(1).name)));
-            imgPath = fullfile(d(1).folder, d(1).name);
-            imgLabel = sprintf('%s (four_state seg)', d(1).name);
-
-        otherwise
-            error('Unknown inputMode: %s. Use ''retardance'' or ''four_state''.', inputMode);
+    % Find retardance image in Pos0
+    d = dir(fullfile(pos0Dir, retardance_pattern));
+    d = d(~[d.isdir]);
+    if isempty(d)
+        fprintf('  [SKIP] %s/Pos0 — no retardance images matching "%s"\n', ...
+            smName, retardance_pattern);
+        nSkipped = nSkipped + 1;
+        continue;
     end
+    [~, sortIdx] = sort({d.name});
+    d = d(sortIdx);
+    imgPath = fullfile(d(1).folder, d(1).name);
+    Iraw = double(imread(imgPath));
+    imgLabel = d(1).name;
 
     % Call the shared contour measurement function
     res = measure_contour_retardance(Iraw, opts);
@@ -272,12 +186,7 @@ for si = 1:numel(smDirs)
         smName, imgLabel, peakDepth, cvMean, oocyteR_um(nProcessed), numel(cv));
 
     if saveOverlays
-        if ~isempty(opts.Iseg)
-            Ioverlay = opts.Iseg;
-        else
-            Ioverlay = Iraw;
-        end
-        save_contour_overlay(Ioverlay, res, overlayDir, smName, imgPath);
+        save_contour_overlay(Iraw, res, overlayDir, smName, imgPath);
     end
 end
 
@@ -414,11 +323,7 @@ results.bit_depth             = opts.bit_depth;
 results.px_per_um             = px_per_um;
 results.binEdges_nm           = binEdges;
 results.binCenters_nm         = binCenters;
-saveOpts = opts;
-if isfield(saveOpts, 'Iseg')
-    saveOpts.Iseg = [];
-end
-results.opts                  = saveOpts;
+results.opts                  = opts;
 results.saveOverlays          = saveOverlays;
 results.overlayDir            = overlayDir;
 results.parent_dir            = parent_dir;
@@ -463,20 +368,20 @@ function save_contour_overlay(Ioverlay, res, overlayDir, smName, imgPath)
     combinedOverlay(:,:,1) = max(combinedOverlay(:,:,1), segBoundary);
     combinedOverlay(:,:,2) = max(combinedOverlay(:,:,2), activeBoundary);
 
-    imwrite(segOverlay, fullfile(overlayDir, [outBase '_segmentation_overlay.png']));
+    imwrite(segOverlay, fullfile(overlayDir, [outBase '_seed_overlay.png']));
     imwrite(activeOverlay, fullfile(overlayDir, [outBase '_activecontour_overlay.png']));
     imwrite(combinedOverlay, fullfile(overlayDir, [outBase '_combined_overlay.png']));
-    imwrite(mat2gray(Ioverlay), fullfile(overlayDir, [outBase '_fourstate_base.png']));
+    imwrite(mat2gray(Ioverlay), fullfile(overlayDir, [outBase '_retardance_base.png']));
+
+    if isfield(res, 'ridgeResponse') && ~isempty(res.ridgeResponse)
+        imwrite(mat2gray(res.ridgeResponse), fullfile(overlayDir, [outBase '_ridge_response.png']));
+    end
 
     if isfield(res, 'gradMask') && ~isempty(res.gradMask)
-        imwrite(res.gradMask, fullfile(overlayDir, [outBase '_gradient_mask.png']));
+        imwrite(res.gradMask, fullfile(overlayDir, [outBase '_ridge_mask.png']));
     end
 
     if isfield(res, 'edgeMask') && ~isempty(res.edgeMask)
-        imwrite(res.edgeMask, fullfile(overlayDir, [outBase '_edge_mask.png']));
-    end
-
-    if isfield(res, 'boundarySupport') && ~isempty(res.boundarySupport)
-        imwrite(res.boundarySupport, fullfile(overlayDir, [outBase '_boundary_support.png']));
+        imwrite(res.edgeMask, fullfile(overlayDir, [outBase '_canny_fallback.png']));
     end
 end
