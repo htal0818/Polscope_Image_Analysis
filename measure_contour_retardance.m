@@ -3,98 +3,63 @@ function result = measure_contour_retardance(Iraw, opts)
 %
 %   result = measure_contour_retardance(Iraw, opts)
 %
-%   Takes a raw 16-bit PolScope image (double) and returns retardance values
-%   sampled along the detected oocyte boundary.
+%   Segmentation uses Laplacian-of-Gaussian ridge detection to build an
+%   initial seed, refined by an edge-based active contour.
 %
 %   INPUTS
 %     Iraw  — [H x W] double, raw pixel values (e.g. 0..65535 for 16-bit)
-%             Used for retardance conversion and measurement.
 %     opts  — struct with fields (all optional, defaults shown):
-%               retardance_ceiling_nm  (50)     Polscope ceiling in nm
-%               bit_depth              (16)     image bit depth
-%               sigmaBlur              (20)     Gaussian blur sigma for segmentation
-%               closeRadius            (25)     morphological close disk radius
-%               minArea                (5000)   minimum object area in px^2
-%               boundaryInset_px       (10)     shift boundary inward onto cortex
-%               thresholdMode          ('otsu') 'otsu', 'fixed', 'percentile',
-%                                               or 'adaptive'
-%               fixedThreshold         (500)    for 'fixed' mode
-%               percentileThreshold    (30)     for 'percentile' mode
-%               adaptiveSensitivity    (0.5)    for 'adaptive' mode (0-1,
-%                                               higher = more foreground)
-%               useGradientThreshold   (false)  add high-gradient support mask
-%               gradSigma              (1.5)    Gaussian sigma for gradient image
-%               gradPercentile         (92)     gradient percentile threshold
-%               useEdgeThreshold       (false)  add Canny edge support mask
-%               cannyThresholds        ([0.08 0.25]) Canny thresholds on normalized image
-%               useBoundarySupportMask (false)  build mask from gradient/edge support
-%               boundaryCloseRadius    (25)     close radius for edge/gradient mask
-%               boundaryDilateRadius   (3)      dilation radius for edge/gradient support
-%               useActiveContour       (false)  refine BW after thresholding
-%               activeContourIterations (200)   active contour iterations
-%               activeContourMethod    ('edge') 'edge' or 'Chan-Vese'
-%               um_per_px              (1)      spatial calibration
-%               profileMaxDepth_um     (50)     max inward depth for radial profile
-%               profileDepthStep_um    (1)      inward radial bin size
-%               peakSearchDepthRange_um ([0 50]) search range for peak ring
-%               prevBW                 ([])     previous frame mask for fallback
-%               Iseg                   ([])     separate image for segmentation
-%                                               (e.g. avg of State1-4). If empty,
-%                                               Iraw is used for segmentation.
+%               retardance_ceiling_nm    (50)       Polscope ceiling in nm
+%               bit_depth                (16)       image bit depth
+%               smoothSigma              (1.8)      Gaussian blur sigma for segmentation
+%               ridgeSigma               (2.0)      LoG kernel sigma for ridge detection
+%               closeRadius              (12)       morphological close disk radius for seed
+%               seedDilateRadius         (3)        dilate seed before active contour
+%               minArea                  (5000)     minimum object area in px^2
+%               boundaryInset_px         (1)        shift boundary inward onto cortex
+%               activeContourIterations  (200)      active contour iterations
+%               activeContourSmoothness  (1.5)      active contour smooth factor
+%               edgeContractionBias      (0.0)      active contour contraction bias
+%               um_per_px                (1)        spatial calibration
+%               profileMaxDepth_um       (50)       max inward depth for radial profile
+%               profileDepthStep_um      (1)        inward radial bin size
+%               peakSearchDepthRange_um  ([0 50])   search range for peak ring
+%               prevBW                   ([])       previous frame mask for fallback
+%               Iseg                     ([])       separate image for segmentation;
+%                                                   if empty, Iraw is used
 %
 %   OUTPUT
 %     result — struct with fields:
-%               contourValues  — [N x 1] retardance (nm) at each boundary point
-%               contourMean    — scalar, mean contour retardance (nm)
-%               contourStd     — scalar, std of contour retardance (nm)
-%               contourMax     — scalar
-%               contourMin     — scalar
-%               xb, yb         — boundary point coordinates (after inset)
-%               xc, yc         — circle-fit center
-%               R_fit          — circle-fit radius (px)
-%               BW             — final binary mask of the oocyte
-%               BW_initial     — pre-active-contour binary mask
-%               gradMask       — high-gradient support pixels
-%               edgeMask       — Canny edge support pixels
-%               peakRingValues — retardance values at peak radial depth
-%               peakRingDepth_um — depth where outside-in profile is maximal
-%               Iret           — retardance image in nm
-%               success        — logical, true if boundary was found
+%               contourValues, contourMean, contourStd, contourMax, contourMin
+%               xb, yb          — boundary point coordinates (after inset)
+%               xc, yc          — circle-fit center
+%               R_fit           — circle-fit radius (px)
+%               BW              — final binary mask
+%               BW_initial      — pre-active-contour seed mask
+%               ridgeResponse   — LoG ridge response image
+%               gradMask        — thresholded ridge mask
+%               edgeMask        — Canny fallback edge mask
+%               boundarySupport — (unused, for compatibility)
+%               peakRingValues, peakRingDepth_um, peakRingMean, etc.
+%               Iret            — retardance image in nm
+%               success         — logical
 %
-%   Requires: segment_oocyte.m + circfit.m (in this repo), Image Processing Toolbox
-%
-%   NOTE: segmentation is delegated to segment_oocyte.m (one shared pipeline).
-%   The gradient/edge/boundary-support options listed below are DEPRECATED and
-%   ignored; the mask now comes from segment_oocyte with automatic egg polarity,
-%   and the cortical inset follows the true inward normal (no circular assumption).
+%   Requires: circfit.m, Image Processing Toolbox
 
     %% Defaults
     if nargin < 2; opts = struct(); end
     def = struct( ...
         'retardance_ceiling_nm', 50, ...
         'bit_depth',             16, ...
-        'sigmaBlur',             1, ...
-        'closeRadius',           1, ...
+        'smoothSigma',           1.8, ...
+        'ridgeSigma',            2.0, ...
+        'closeRadius',           12, ...
+        'seedDilateRadius',      3, ...
         'minArea',               5000, ...
         'boundaryInset_px',      1, ...
-        'thresholdMode',         'otsu', ...
-        'fixedThreshold',        500, ...
-        'percentileThreshold',   30, ...
-        'adaptiveSensitivity',   0.5, ...
-        'useGradientThreshold',  true, ...
-        'gradSigma',             1.5, ...
-        'gradPercentile',        92, ...
-        'useEdgeThreshold',      true, ...
-        'cannyThresholds',       [0.08 0.25], ...
-        'edgeDilateRadius',      1, ...
-        'useBoundarySupportMask', true, ...
-        'boundaryCloseRadius',   25, ...
-        'boundaryDilateRadius',  3, ...
-        'useActiveContour',      false, ...
         'activeContourIterations', 200, ...
-        'activeContourMethod',   'edge', ...
-        'activeSmoothFactor',    1.0, ...
-        'activeContractionBias', 0.0, ...
+        'activeContourSmoothness', 1.5, ...
+        'edgeContractionBias',   0.0, ...
         'um_per_px',             1, ...
         'profileMaxDepth_um',    50, ...
         'profileDepthStep_um',   1, ...
@@ -113,71 +78,77 @@ function result = measure_contour_retardance(Iraw, opts)
     Iret = (Iraw / maxPixVal) * opts.retardance_ceiling_nm;
     [H, W] = size(Iraw);
 
-    %% Boundary detection — delegated to the shared segment_oocyte pipeline
-    % Segment on a separate image if provided (e.g. the State1..4 sum, which has
-    % far better egg/background contrast than the retardance image), then copy
-    % that mask onto the retardance image for measurement. If no Iseg is given,
-    % segment the retardance image itself. All segmentation lives in ONE place
-    % (segment_oocyte.m), shared with the flow scripts.
+    %% Select segmentation image
     if ~isempty(opts.Iseg)
         Iseg = opts.Iseg;
     else
         Iseg = Iraw;
     end
 
-    segParams = struct( ...
-        'sigmaBlur',               opts.sigmaBlur, ...
-        'closeRadius',             opts.closeRadius, ...
-        'minArea',                 opts.minArea, ...
-        'thresholdMode',           opts.thresholdMode, ...
-        'fixedThreshold',          opts.fixedThreshold, ...
-        'percentileThreshold',     opts.percentileThreshold, ...
-        'adaptSensitivity',        opts.adaptiveSensitivity, ...
-        'useActiveContour',        opts.useActiveContour, ...
-        'activeContourIterations', opts.activeContourIterations, ...
-        'activeContourMethod',     opts.activeContourMethod, ...
-        'useCaching',              false, ...
-        'smoothMask',              false, ...
-        'smoothBoundary',          false);
+    %% LoG ridge-based segmentation
+    finitePixels = Iseg(isfinite(Iseg));
+    displayLimits = prctile(finitePixels, [0.1 99.9]);
+    Inorm = (Iseg - displayLimits(1)) / (displayLimits(2) - displayLimits(1) + eps);
+    Inorm = min(max(Inorm, 0), 1);
+    segImg = imgaussfilt(Inorm, opts.smoothSigma);
 
-    % Egg polarity:
-    %   - four-state solid disc (Iseg given): leave segFromMask UNSET so
-    %     segment_oocyte auto-detects whether the egg is darker or brighter.
-    %   - retardance image (no Iseg): the egg is defined by its bright cortical
-    %     rim, so force the bright class (segFromMask = false); segment_oocyte
-    %     then fills the disc enclosed by the rim.
-    %   - a caller may override either by setting opts.segFromMask explicitly.
-    if isfield(opts, 'segFromMask') && ~isempty(opts.segFromMask)
-        segParams.segFromMask = opts.segFromMask;
-    elseif isempty(opts.Iseg)
-        segParams.segFromMask = false;
+    kernelSize = 2*ceil(3*opts.ridgeSigma) + 1;
+    logKernel = fspecial('log', kernelSize, opts.ridgeSigma);
+    signedLoG = imfilter(segImg, logKernel, 'replicate', 'conv');
+    ridgeResponse = max(-signedLoG, 0);
+    ridgeScale = prctile(ridgeResponse(:), 99.8);
+    ridgeResponse = min(ridgeResponse / (ridgeScale + eps), 1);
+
+    borderWidth = max(8, round(0.05 * min(size(Iseg))));
+    borderMask = false(size(Iseg));
+    borderMask([1:borderWidth, end-borderWidth+1:end], :) = true;
+    borderMask(:, [1:borderWidth, end-borderWidth+1:end]) = true;
+    background = ridgeResponse(borderMask);
+    noiseThreshold = median(background) + 6 * 1.4826 * mad(background, 1);
+    ridgeThreshold = min(max(graythresh(ridgeResponse), noiseThreshold), 0.98);
+
+    ridgeMask = ridgeResponse > ridgeThreshold;
+    gradMask = ridgeMask;
+    edgeMask = false(size(Iseg));
+    boundarySupport = false(size(Iseg));
+
+    seed = make_filled_seed(ridgeMask, opts.closeRadius);
+
+    % Canny fallback
+    if isempty(seed)
+        edgeMask = edge(segImg, 'Canny', [], max(1, opts.smoothSigma));
+        seed = make_filled_seed(edgeMask, opts.closeRadius);
     end
 
-    [BW, xc, yc, R_fit, polyXY] = segment_oocyte(Iseg, segParams, []);
-
-    % Legacy support masks: no longer used for detection, kept (empty) so the
-    % result struct and the overlay saver stay backward-compatible.
-    gradMask = false(H, W);
-    edgeMask = false(H, W);
-    boundarySupport = false(H, W);
-
-    if isempty(polyXY) && ~isempty(opts.prevBW)
-        BW = opts.prevBW;
-    end
-    if ~any(BW(:))
-        result = make_empty_result(Iret, BW, gradMask, edgeMask, boundarySupport);
-        return;
-    end
-    BW_initial = BW;
-
-    %% Boundary contour (the TRUE outline from the mask — NOT assumed circular)
-    if ~isempty(polyXY)
-        xb = polyXY(:,1);
-        yb = polyXY(:,2);
+    if isempty(seed)
+        if ~isempty(opts.prevBW)
+            BW = opts.prevBW;
+            BW_initial = BW;
+        else
+            result = make_empty_result(Iret, false(H, W), gradMask, edgeMask, boundarySupport);
+            result.ridgeResponse = ridgeResponse;
+            return;
+        end
     else
-        B = bwboundaries(BW);
-        if isempty(B)
-            result = make_empty_result(Iret, BW, gradMask, edgeMask, boundarySupport);
+        if opts.seedDilateRadius > 0
+            seed = imdilate(seed, strel('disk', opts.seedDilateRadius, 0));
+        end
+        seed = imfill(seed, 'holes');
+        BW_initial = seed;
+
+        BW = activecontour(segImg, seed, opts.activeContourIterations, 'edge', ...
+            'SmoothFactor', opts.activeContourSmoothness, ...
+            'ContractionBias', opts.edgeContractionBias);
+        BW = imfill(BW, 'holes');
+        BW = bwareaopen(BW, opts.minArea);
+
+        if any(BW(:))
+            BW = keep_largest_component(BW);
+        elseif ~isempty(opts.prevBW)
+            BW = opts.prevBW;
+        else
+            result = make_empty_result(Iret, BW_initial, gradMask, edgeMask, boundarySupport);
+            result.ridgeResponse = ridgeResponse;
             return;
         end
         [~, iLongest] = max(cellfun(@(p) size(p,1), B));
@@ -186,29 +157,12 @@ function result = measure_contour_retardance(Iraw, opts)
         xb = bnd(:,2);
     end
 
-    %% Inset the boundary inward along the TRUE inward normal (shape-agnostic)
-    % Peel each boundary point in by boundaryInset_px along the local inward
-    % normal, taken from the gradient of the in-mask distance transform. This
-    % follows dents and elongation of a non-circular egg, unlike the old method
-    % that shrank every point radially toward a single circle-fit centre.
-    Din = bwdist(~BW);                       % depth inside the egg (px), 0 at edge
-    [Gx, Gy] = imgradientxy(Din, 'central'); % Gx = x/column gradient, Gy = y/row
-    F_Gx = griddedInterpolant({1:H, 1:W}, Gx, 'linear', 'nearest');
-    F_Gy = griddedInterpolant({1:H, 1:W}, Gy, 'linear', 'nearest');
-    nx = F_Gx(yb, xb);                       % x-component of inward normal
-    ny = F_Gy(yb, xb);                       % y-component of inward normal
-    nmag = hypot(nx, ny) + eps;
-    nx = nx ./ nmag;                         % inward = +gradient of interior depth
-    ny = ny ./ nmag;
-
-    % Guarantee the normal points into the egg (toward the centroid), even where
-    % the distance-transform gradient is degenerate.
-    S = regionprops(BW, 'Centroid');
-    if ~isempty(S)
-        cen = S(1).Centroid;
-        flip = ((cen(1) - xb) .* nx + (cen(2) - yb) .* ny) < 0;
-        nx(flip) = -nx(flip);
-        ny(flip) = -ny(flip);
+    %% Extract boundary contour
+    B = bwboundaries(BW);
+    if isempty(B)
+        result = make_empty_result(Iret, BW, gradMask, edgeMask, boundarySupport);
+        result.ridgeResponse = ridgeResponse;
+        return;
     end
 
     xb = xb + opts.boundaryInset_px * nx;
@@ -234,6 +188,7 @@ function result = measure_contour_retardance(Iraw, opts)
     result.R_fit         = R_fit;
     result.BW            = BW;
     result.BW_initial    = BW_initial;
+    result.ridgeResponse = ridgeResponse;
     result.gradMask      = gradMask;
     result.edgeMask      = edgeMask;
     result.boundarySupport = boundarySupport;
@@ -251,6 +206,27 @@ function result = measure_contour_retardance(Iraw, opts)
     result.Iret          = Iret;
     result.success       = true;
 end
+
+
+function seed = make_filled_seed(edgeMask, closeRadius)
+    seed = [];
+    edgeMask = bwareaopen(logical(edgeMask), 8);
+    edgeMask = imclearborder(edgeMask);
+    if nnz(edgeMask) < 20
+        return
+    end
+    if closeRadius > 0
+        edgeMask = imclose(edgeMask, strel('disk', closeRadius, 0));
+    end
+    candidate = imfill(edgeMask, 'holes');
+    candidate = bwareafilt(candidate, 1);
+    fraction = nnz(candidate) / numel(candidate);
+    if fraction < 0.005 || fraction > 0.95
+        return
+    end
+    seed = candidate;
+end
+
 
 function peakRing = compute_peak_ring_stats(Iret, BW, opts)
     depthStep_um = opts.profileDepthStep_um;
@@ -320,37 +296,22 @@ function peakRing = compute_peak_ring_stats(Iret, BW, opts)
     peakRing.mask      = reshape(peakPixelMask, size(BW));
 end
 
+
 function m = local_nanmean(x)
     m = mean(x, 'omitnan');
 end
 
-function BW_boundary = make_boundary_support_mask(boundarySupport, opts)
-    BW_boundary = boundarySupport;
-
-    if opts.edgeDilateRadius > 0
-        BW_boundary = imdilate(BW_boundary, strel('disk', opts.edgeDilateRadius));
-    end
-
-    if opts.boundaryDilateRadius > 0
-        BW_boundary = imdilate(BW_boundary, strel('disk', opts.boundaryDilateRadius));
-    end
-
-    BW_boundary = imclose(BW_boundary, strel('disk', opts.boundaryCloseRadius));
-    BW_boundary = imfill(BW_boundary, 'holes');
-    BW_boundary = bwareaopen(BW_boundary, opts.minArea);
-    BW_boundary = keep_largest_component(BW_boundary);
-end
 
 function BW = keep_largest_component(BW)
     L = bwlabel(BW, 8);
     if max(L(:)) < 1
         return;
     end
-
     S = regionprops(L, 'Area');
     [~, iMax] = max([S.Area]);
     BW = (L == iMax);
 end
+
 
 function result = make_empty_result(Iret, BW, gradMask, edgeMask, boundarySupport)
     if nargin < 3; gradMask = []; end
@@ -369,20 +330,21 @@ function result = make_empty_result(Iret, BW, gradMask, edgeMask, boundarySuppor
     result.R_fit         = NaN;
     result.BW            = BW;
     result.BW_initial    = BW;
+    result.ridgeResponse = [];
     result.gradMask      = gradMask;
     result.edgeMask      = edgeMask;
     result.boundarySupport = boundarySupport;
+    result.depthAxis_um    = [];
+    result.distProfile_nm  = [];
+    result.peakRingDepth_um = NaN;
+    result.peakRingValues  = [];
+    result.peakRingMean    = NaN;
+    result.peakRingMedian  = NaN;
+    result.peakRingStd     = NaN;
+    result.peakRingMax     = NaN;
+    result.peakRingMin     = NaN;
+    result.peakRingN_px    = 0;
+    result.peakRingMask    = false(size(BW));
     result.Iret          = Iret;
     result.success       = false;
-end
-
-function I_norm = normalize01(I)
-    I = double(I);
-    lo = min(I(:));
-    hi = max(I(:));
-    if hi > lo
-        I_norm = (I - lo) ./ (hi - lo);
-    else
-        I_norm = zeros(size(I));
-    end
 end
